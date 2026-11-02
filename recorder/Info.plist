@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.lifelog.recorder</string>
+  <key>CFBundleName</key><string>Lifelog</string>
+  <key>CFBundleDisplayName</key><string>Lifelog</string>
+  <key>CFBundleExecutable</key><string>Lifelog</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.2</string>
+  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>NSHumanReadableCopyright</key><string>Records everything; Claude tells you where your time went.</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Lifelog records the microphone so it can tell when you were talking and transcribe it locally.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Lifelog asks your browser for the current tab URL to know which site you were on.</string>
+  <key>NSScreenCaptureUsageDescription</key><string>Lifelog takes periodic screenshots and records computer audio so you can see what you were doing.</string>
+</dict>
+</plist>

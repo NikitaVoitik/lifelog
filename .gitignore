@@ -1,0 +1,7 @@
+build/
+asr/.build/
+__pycache__/
+*.pyc
+.DS_Store
+cloud/node_modules/
+cloud/.wrangler/

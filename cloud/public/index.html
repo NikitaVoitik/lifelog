@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifelog — __TITLE__</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface-1: #fcfcfb; --surface-2: #efeeea; --border: #e2e1dc;
+  --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974;
+  --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4; --c6: #008300; --c7: #6250d6; --c8: #e34948;
+  --idle: #b9b8b2; --away: #dddcd6; --sleep: #9db4d6; --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  .viz-root {
+    color-scheme: dark;
+    --bg: #111110; --surface-1: #1a1a19; --surface-2: #232321; --border: #2e2e2b;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8d8c84;
+    --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181; --c6: #008300; --c7: #9085e9; --c8: #e66767;
+    --idle: #6b6b65; --away: #45453f; --sleep: #2e3f5c; --accent: #3987e5;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", sans-serif; }
+.viz-root { background: var(--bg); color: var(--text-primary); min-height: 100vh; padding: 28px clamp(16px, 4vw, 48px) 80px; }
+.wrap { max-width: 1240px; margin: 0 auto; }
+header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 0 0 12px; font-weight: 600; }
+a { color: var(--accent); text-decoration: none; }
+.nav { color: var(--text-muted); font-size: 13px; }
+.nav a { margin-right: 10px; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--text-secondary); }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.tile .v { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
+.tile .l { color: var(--text-muted); font-size: 12px; }
+.summary { color: var(--text-secondary); max-width: 80ch; }
+.summary strong { color: var(--text-primary); }
+.summary ul { margin: 6px 0 12px; padding-left: 20px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* day strip */
+.strip-wrap { position: relative; }
+.axis { position: relative; height: 18px; color: var(--text-muted); font-size: 11px; margin-left: 110px; }
+.axis span { position: absolute; transform: translateX(-50%); }
+.row { display: flex; align-items: center; margin: 4px 0; }
+.row .lab { width: 110px; flex: none; font-size: 12px; color: var(--text-secondary); }
+.track { position: relative; flex: 1; height: 28px; background: var(--surface-2); border-radius: 6px; overflow: hidden; cursor: pointer; }
+.track.thin { height: 14px; }
+.track .seg { position: absolute; top: 0; bottom: 0; border-right: 2px solid var(--surface-1); }
+.track .seg:hover, .track .seg.sel { filter: brightness(1.15); outline: 2px solid var(--text-primary); outline-offset: -2px; z-index: 2; }
+.track .bar { position: absolute; bottom: 0; }
+.cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-primary); pointer-events: none; opacity: .6; display: none; }
+.tip { position: fixed; pointer-events: none; z-index: 50; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; max-width: 340px; box-shadow: 0 6px 24px rgba(0,0,0,.18); display: none; }
+.tip .t { color: var(--text-muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 12px; font-size: 12px; color: var(--text-secondary); }
+.legend i, .chip i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+/* bars */
+.hbar { display: grid; grid-template-columns: 150px 1fr 70px; align-items: center; gap: 10px; margin: 7px 0; font-size: 13px; }
+.hbar .name { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar .b { height: 12px; background: var(--surface-2); border-radius: 0 4px 4px 0; position: relative; }
+.hbar .b > div { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; }
+.hbar .val { text-align: right; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+/* segment list */
+.tools { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+input[type=search] { flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); font: inherit; }
+select { padding: 7px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); font: inherit; }
+.seglist { list-style: none; margin: 0; padding: 0; }
+.seglist > li { border-top: 1px solid var(--border); }
+.seghead { display: grid; grid-template-columns: 112px 64px 1fr; gap: 12px; padding: 10px 4px; cursor: pointer; align-items: start; }
+.seghead:hover { background: var(--surface-2); }
+.seghead .time { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 13px; }
+.seghead .dur { font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 13px; text-align: right; }
+.seghead .act { font-weight: 560; }
+.seghead .det { color: var(--text-secondary); font-size: 13px; margin-top: 2px; }
+.chip { font-size: 11px; color: var(--text-muted); margin-right: 8px; white-space: nowrap; }
+.detail { padding: 6px 4px 18px 188px; display: none; }
+li.open .detail { display: block; }
+@media (max-width: 760px) { .detail { padding-left: 4px; } .seghead { grid-template-columns: 90px 50px 1fr; } }
+.viewer img { width: 100%; border-radius: 8px; border: 1px solid var(--border); display: block; background: var(--surface-2); }
+.viewer .ctrl { display: flex; gap: 10px; align-items: center; margin: 8px 0; font-size: 12px; color: var(--text-secondary); }
+.viewer input[type=range] { flex: 1; }
+button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); cursor: pointer; }
+.trans { margin-top: 10px; font-size: 13px; }
+.trans div { margin: 3px 0; color: var(--text-secondary); }
+.trans .who { color: var(--text-muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.audio { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 12px; color: var(--text-muted); }
+audio { width: 100%; height: 32px; }
+.empty { color: var(--text-muted); padding: 20px 0; }
+.grid2 > *, .seghead > *, .hbar > *, .row .track { min-width: 0; }
+.hbar { grid-template-columns: minmax(0, 150px) minmax(0, 1fr) 70px; }
+@media (max-width: 600px) {
+  .viz-root { padding: 18px 12px 60px; }
+  .card { padding: 14px; }
+  h1 { font-size: 22px; }
+  .tiles { grid-template-columns: 1fr 1fr; }
+  .tile .v { font-size: 20px; }
+  .row .lab { width: 74px; font-size: 11px; }
+  .axis { margin-left: 74px; }
+  .hbar { grid-template-columns: minmax(0, 110px) minmax(0, 1fr) 56px; }
+  .seghead { grid-template-columns: 1fr auto; }
+  .seghead > div:nth-child(3) { grid-column: 1 / -1; }
+  .detail { padding-left: 4px; }
+}
+.note { color: var(--text-muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="viz-root"><div class="wrap">
+  <header>
+    <h1 id="title"></h1>
+    <span class="badge" id="aibadge"></span>
+    <span class="nav" id="nav"></span>
+  </header>
+  <div class="tiles" id="tiles"></div>
+  <div class="card" id="summaryCard" style="display:none"><h2>The day</h2><div class="summary" id="summary"></div></div>
+  <div class="card">
+    <h2>Timeline</h2>
+    <div class="strip-wrap" id="strip"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>By category</h2><div id="cats"></div></div>
+    <div class="card"><h2>Top apps &amp; sites (active time)</h2><div id="apps"></div></div>
+  </div>
+  <div class="card">
+    <h2>Every segment</h2>
+    <div class="tools">
+      <input type="search" id="q" placeholder="Filter: twitter, prompt, call with…">
+      <select id="catf"><option value="">All categories</option></select>
+      <span class="note" id="count"></span>
+    </div>
+    <ul class="seglist" id="segs"></ul>
+  </div>
+  <p class="note" id="foot"></p>
+</div></div>
+<div class="tip" id="tip"></div>
+<script>
+let D = /*__DATA__*/null;
+const CAT_VAR = {
+  "coding & AI agents": "--c1", "communication": "--c2", "voice & calls": "--c3", "social media": "--c4",
+  "entertainment": "--c5", "browsing & research": "--c6", "writing & planning": "--c7", "other": "--c8",
+  "idle at desk": "--idle", "away": "--away", "sleep": "--sleep",
+};
+const color = c => `var(${CAT_VAR[c] || "--c8"})`;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pad = n => String(n).padStart(2, "0");
+const clock = (ts, sec) => { const d = new Date(ts * 1000); return pad(d.getHours()) + ":" + pad(d.getMinutes()) + (sec ? ":" + pad(d.getSeconds()) : ""); };
+const dur = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h}h ${pad(m)}m` : m ? `${m}m` : `${s}s`; };
+
+function main() {
+$("title").textContent = D.title;
+$("aibadge").textContent = D.ai ? "AI timeline" : "raw (AI analysis not run yet)";
+$("nav").innerHTML = D.cloud ? `<a href="?day=${D.prev}">← ${D.prev}</a><a href="?day=${D.next}">${D.next} →</a>` : `<a href="${D.prev}.html">← ${D.prev}</a><a href="${D.next}.html">${D.next} →</a>`;
+if (D.cloudViewer) $("nav").insertAdjacentHTML("beforeend", `<a href="${esc(D.cloudViewer)}">open in cloud ↗</a>`);
+$("foot").textContent = `Generated ${new Date(D.generated * 1000).toLocaleString()} · ${D.shots.length} screenshots · ${D.transcripts.length} transcript lines · ${D.audio.length} audio chunks`;
+
+// ---------- tiles
+const segs = D.segments;
+const catTotals = {};
+for (const s of segs) if (s.c !== "sleep") catTotals[s.c] = (catTotals[s.c] || 0) + (s.e - s.s);  // awake time only
+const activeSec = D.minutes.reduce((a, m) => a + m[0], 0);
+const speechSec = D.minutes.reduce((a, m) => a + m[2], 0);
+const keys = D.minutes.reduce((a, m) => a + m[1], 0);
+const topCat = Object.entries(catTotals).filter(([c]) => c !== "away" && c !== "idle at desk").sort((a, b) => b[1] - a[1])[0];
+const tiles = [
+  [D.first ? `${clock(D.first)}–${clock(D.last)}` : "—", "first → last activity"],
+  [dur(activeSec), "hands on keyboard/mouse"],
+  [topCat ? dur(topCat[1]) : "—", topCat ? `top: ${topCat[0]}` : "top category"],
+  [dur(speechSec), "voice near the laptop"],
+  [keys.toLocaleString(), "keystrokes"],
+];
+$("tiles").innerHTML = tiles.map(([v, l]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join("");
+
+// ---------- summary (tiny markdown)
+if (D.summary) {
+  $("summaryCard").style.display = "";
+  const md = esc(D.summary).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  let out = "", inList = false;
+  for (const line of md.split("\n")) {
+    if (/^\s*[-*] /.test(line)) { if (!inList) { out += "<ul>"; inList = true; } out += `<li>${line.replace(/^\s*[-*] /, "")}</li>`; }
+    else { if (inList) { out += "</ul>"; inList = false; } if (line.trim()) out += `<p>${line}</p>`; }
+  }
+  $("summary").innerHTML = out + (inList ? "</ul>" : "");
+}
+
+// ---------- strip
+const tip = $("tip");
+function showTip(e, html) { tip.innerHTML = html; tip.style.display = "block";
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + "px"; tip.style.top = y + "px"; }
+function hideTip() { tip.style.display = "none"; }
+
+let h0 = 0, h1 = 24;
+if (D.first) { h0 = Math.floor((D.first - D.dayStart) / 3600); h1 = Math.min(24, Math.ceil((D.last - D.dayStart) / 3600)); if (h1 <= h0) h1 = h0 + 1; }
+const T0 = D.dayStart + h0 * 3600, T1 = D.dayStart + h1 * 3600;
+const pct = ts => ((ts - T0) / (T1 - T0) * 100);
+let axis = `<div class="axis">`;
+const stepH = (h1 - h0) > 12 ? 2 : 1;
+for (let h = h0; h <= h1; h += stepH) axis += `<span style="left:${pct(D.dayStart + h * 3600)}%">${pad(h % 24)}:00</span>`;
+axis += `</div>`;
+let rows = `<div class="row"><div class="lab">Activity</div><div class="track" id="segTrack">`;
+segs.forEach((s, i) => { rows += `<div class="seg" data-i="${i}" style="left:${pct(s.s)}%;width:${Math.max(0.05, pct(s.e) - pct(s.s))}%;background:${color(s.c)}"></div>`; });
+rows += `<div class="cursor"></div></div></div>`;
+function intensityRow(label, idx, cvar, max) {
+  let r = `<div class="row"><div class="lab">${label}</div><div class="track thin" data-row="${idx}">`;
+  for (let m = h0 * 60; m < h1 * 60; m++) {
+    const v = D.minutes[m][idx]; if (!v) continue;
+    const a = Math.min(1, v / max);
+    r += `<div class="bar" style="left:${pct(D.dayStart + m * 60)}%;width:${100 / ((h1 - h0) * 60)}%;height:100%;background:var(${cvar});opacity:${(0.25 + 0.75 * a).toFixed(2)}"></div>`;
+  }
+  return r + `<div class="cursor"></div></div></div>`;
+}
+rows += intensityRow("Typing", 1, "--c1", 200) + intensityRow("Voice (mic)", 2, "--c3", 30) + intensityRow("Computer audio", 3, "--c5", 40);
+$("strip").innerHTML = axis + rows;
+
+const segAt = ts => segs.findIndex(s => ts >= s.s && ts < s.e);
+document.querySelectorAll("#strip .track").forEach(tr => {
+  tr.addEventListener("mousemove", e => {
+    const r = tr.getBoundingClientRect(), ts = T0 + (e.clientX - r.left) / r.width * (T1 - T0);
+    document.querySelectorAll("#strip .cursor").forEach(c => { c.style.display = "block"; c.style.left = ((e.clientX - r.left) / r.width * 100) + "%"; });
+    const i = segAt(ts), m = D.minutes[Math.floor((ts - D.dayStart) / 60)] || [0, 0, 0, 0];
+    const s = segs[i];
+    showTip(e, `<div class="t">${clock(ts)}</div>` + (s ? `<div><span class="chip"><i style="background:${color(s.c)}"></i>${esc(s.c)}</span></div><b>${esc(s.activity)}</b><div class="t">${clock(s.s)}–${clock(s.e)} · ${dur(s.e - s.s)}</div>` : "")
+      + `<div class="t">this minute: ${m[0]}s active · ${m[1]} keys · ${m[2]}s voice · ${m[3]}s computer audio</div>`);
+  });
+  tr.addEventListener("mouseleave", () => { hideTip(); document.querySelectorAll("#strip .cursor").forEach(c => c.style.display = "none"); });
+  tr.addEventListener("click", e => {
+    const r = tr.getBoundingClientRect(), ts = T0 + (e.clientX - r.left) / r.width * (T1 - T0);
+    const i = segAt(ts); if (i >= 0) openSeg(i, true, ts);
+  });
+});
+
+const usedCats = D.categories.filter(c => catTotals[c] || segs.some(s => s.c === c));
+$("legend").innerHTML = usedCats.map(c => `<span><i style="background:${color(c)}"></i>${esc(c)}</span>`).join("");
+
+// ---------- category + apps bars
+function bars(el, items, colorFn) {
+  const max = Math.max(1, ...items.map(i => i[1]));
+  el.innerHTML = items.length ? items.map(([n, v]) => `<div class="hbar"><div class="name" title="${esc(n)}">${colorFn ? `<span class="chip" style="margin:0"><i style="background:${colorFn(n)}"></i></span>` : ""}${esc(n)}</div>
+    <div class="b"><div style="width:${(v / max * 100).toFixed(1)}%;background:${colorFn ? colorFn(n) : "var(--c1)"}"></div></div><div class="val">${dur(v)}</div></div>`).join("")
+    : `<div class="empty">No data yet.</div>`;
+}
+bars($("cats"), Object.entries(catTotals).sort((a, b) => b[1] - a[1]), color);
+bars($("apps"), D.apps, null);
+
+// ---------- segment list
+const catf = $("catf");
+usedCats.forEach(c => catf.insertAdjacentHTML("beforeend", `<option>${esc(c)}</option>`));
+function renderList() {
+  const q = $("q").value.toLowerCase().trim(), cf = catf.value;
+  let n = 0;
+  $("segs").innerHTML = segs.map((s, i) => {
+    if (cf && s.c !== cf) return "";
+    if (q && !(`${s.activity} ${s.detail} ${s.app} ${s.c}`.toLowerCase().includes(q))) return "";
+    n++;
+    return `<li id="seg${i}" data-i="${i}"><div class="seghead"><div class="time">${clock(s.s, true)}–${clock(s.e)}</div><div class="dur">${dur(s.e - s.s)}</div>
+      <div><div><span class="chip"><i style="background:${color(s.c)}"></i>${esc(s.c)}</span><span class="act">${esc(s.activity)}</span></div>
+      ${s.detail ? `<div class="det">${esc(s.detail)}</div>` : ""}</div></div><div class="detail"></div></li>`;
+  }).join("") || `<div class="empty">Nothing matches.</div>`;
+  $("count").textContent = `${n} of ${segs.length}`;
+  document.querySelectorAll("#segs .seghead").forEach(h => h.addEventListener("click", () => openSeg(+h.parentElement.dataset.i)));
+}
+$("q").addEventListener("input", renderList);
+catf.addEventListener("change", renderList);
+renderList();
+
+function openSeg(i, scroll, atTs) {
+  let li = $("seg" + i);
+  if (!li) { $("q").value = ""; catf.value = ""; renderList(); li = $("seg" + i); }
+  const wasOpen = li.classList.contains("open");
+  if (wasOpen && !scroll) { li.classList.remove("open"); markSel(-1); return; }
+  li.classList.add("open");
+  markSel(i);
+  const s = segs[i], det = li.querySelector(".detail");
+  const shots = D.shots.filter(x => x[0] >= s.s && x[0] < s.e);
+  const tr = D.transcripts.filter(t => t[1] >= s.s && t[0] < s.e);
+  const au = D.audio.filter(a => a[1] > s.s && a[0] < s.e);
+  let h = "";
+  if (shots.length) {
+    let start = 0;
+    if (atTs) { start = shots.findIndex(x => x[0] >= atTs); if (start < 0) start = shots.length - 1; }
+    h += `<div class="viewer"><img alt="screenshot" loading="lazy"><div class="ctrl"><button data-d="-1">◀</button><input type="range" min="0" max="${shots.length - 1}" value="${start}"><button data-d="1">▶</button><span class="lbl"></span></div></div>`;
+  } else h += `<div class="note">No screenshots in this segment.</div>`;
+  if (tr.length) h += `<div class="trans">${tr.map(t => `<div><span class="who">${clock(t[0], true)} ${t[2] === "mic" ? "🎙" : "🔊"} ${esc(t[4] || (t[2] === "mic" ? "mic" : "computer"))}</span>${esc(t[3])}</div>`).join("")}</div>`;
+  if (au.length) h += `<div class="audio">${au.map(a => `<div>${a[2] === "mic" ? "🎙 Microphone" : "🔊 Computer audio"} ${clock(a[0], true)}–${clock(a[1], true)}<audio controls preload="none" src="${esc(a[3])}" data-off="${Math.max(0, s.s - a[0])}"></audio></div>`).join("")}</div>`;
+  det.innerHTML = h;
+  det.querySelectorAll("audio").forEach(a => a.addEventListener("loadedmetadata", () => { if (!a.dataset.done) { a.currentTime = +a.dataset.off; a.dataset.done = 1; } }));
+  if (shots.length) {
+    const img = det.querySelector("img"), rng = det.querySelector("input[type=range]"), lbl = det.querySelector(".lbl");
+    const show = () => { const x = shots[+rng.value]; img.src = x[1]; lbl.textContent = `${clock(x[0], true)} · ${x[2]}${x[3] ? " — " + x[3].slice(0, 70) : ""} (${+rng.value + 1}/${shots.length})`; };
+    rng.addEventListener("input", show);
+    det.querySelectorAll("button[data-d]").forEach(b => b.addEventListener("click", () => { rng.value = Math.max(0, Math.min(shots.length - 1, +rng.value + +b.dataset.d)); show(); }));
+    show();
+  }
+  if (scroll) li.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function markSel(i) { document.querySelectorAll("#segTrack .seg").forEach(el => el.classList.toggle("sel", +el.dataset.i === i)); }
+document.addEventListener("keydown", e => {
+  const open = document.querySelector("#segs li.open .viewer input[type=range]");
+  if (!open || e.target.tagName === "INPUT" && e.target.type !== "range") return;
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { open.value = +open.value + (e.key === "ArrowRight" ? 1 : -1); open.dispatchEvent(new Event("input")); e.preventDefault(); }
+});
+}
+
+// Cloud mode (served by the Worker): no embedded data, fetch it from the API.
+async function loadCloud() {
+  const qs = new URLSearchParams(location.search);
+  if (qs.get("token")) { localStorage.ll_token = qs.get("token"); history.replaceState(null, "", location.pathname + (qs.get("day") ? "?day=" + qs.get("day") : "")); }
+  let token = localStorage.ll_token;
+  if (!token) { token = prompt("Lifelog API token (from ~/Lifelog/config.json → cloudToken)"); if (!token) return null; localStorage.ll_token = token; }
+  document.cookie = `ll_token=${encodeURIComponent(token)}; path=/; max-age=31536000; secure; samesite=strict`;
+  const now = new Date();
+  const day = qs.get("day") || `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const r = await fetch(`/api/day/${day}?device=${encodeURIComponent(qs.get("device") || "mac")}`);
+  if (r.status === 401) { delete localStorage.ll_token; document.body.textContent = "Wrong token — reload to try again."; return null; }
+  return r.json();
+}
+(async () => {
+  if (!D) D = await loadCloud();
+  if (D) main();
+})();
+</script>
+</body>
+</html>
