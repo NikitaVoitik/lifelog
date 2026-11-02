@@ -56,6 +56,8 @@ DEFAULTS = {
     "agentLogDelta": True,              # read Delta threads via the `delta` CLI
     "agentLogBackfillDays": 2,          # how far back the first scan of a source goes
     "absenceMinMinutes": 45,            # no-interaction stretches this long get a second look from Claude (sleep? nap? out?)
+    "claudeConfigDir": "",     # which Claude Code login runs the analysis: "" = whatever the environment says,
+                               # "default" = the root login (~/.claude.json), or a config dir like "~/.claude-work"
     "aboutMe": "",  # optional: who you are / what your projects are called — helps Claude label things
     # --- cloud (Cloudflare R2 + D1 + Worker) ---
     "deviceId": "mac",
@@ -939,7 +941,13 @@ def ask_claude(prompt: str, system: str, model: str, schema: dict | None = None,
            "--setting-sources", "", "--output-format", "json", "--system-prompt", system]
     if schema:
         cmd += ["--json-schema", json.dumps(schema)]
-    p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=tempfile.gettempdir())
+    env = dict(os.environ)
+    acct = CFG.get("claudeConfigDir") or ""
+    if acct == "default":
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    elif acct:
+        env["CLAUDE_CONFIG_DIR"] = str(Path(acct).expanduser())
+    p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=tempfile.gettempdir(), env=env)
     if p.returncode != 0:
         raise RuntimeError(f"claude failed ({p.returncode}): {(p.stderr or p.stdout).strip()[-500:]}")
     out = json.loads(p.stdout)

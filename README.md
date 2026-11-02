@@ -119,7 +119,7 @@ Apps in `excludedBundleIDs` (password managers by default) are never screenshott
 ## Config — `~/Lifelog/config.json`
 
 Recorder settings: `screenshotFPS`, `ocrInterval`, `screenshotMaxWidth`, `jpegQuality`, `recordMic`, `preferBuiltInMic`, `recordSystemAudio`, `recordAudioWhenLocked`, `excludedBundleIDs`.
-Pipeline settings: `transcriber` (`fluidaudio` | `whisper`), `diarize`, `voiceMatchThreshold` (0.72), `analysisModel` (default `sonnet`), `summaryModel`, `transcribeLanguage` (whisper only), `micSpeechThresholdDb`, `aboutMe` (tell Claude your project and friend names so its labels are sharper), `agentLogHosts` (e.g. `["devbox"]`), `agentLogDelta` (true), `agentLogBackfillDays` (2).
+Pipeline settings: `transcriber` (`fluidaudio` | `whisper`), `diarize`, `voiceMatchThreshold` (0.72), `analysisModel` (default `sonnet`), `summaryModel`, `transcribeLanguage` (whisper only), `micSpeechThresholdDb`, `claudeConfigDir` (which Claude Code login runs the analysis: `default` = the root login, or a config dir), `aboutMe` (tell Claude your project and friend names so its labels are sharper), `agentLogHosts` (e.g. `["devbox"]`), `agentLogDelta` (true), `agentLogBackfillDays` (2).
 Cloud settings: `r2Bucket`, `cloudUrl`, `cloudToken`, `deviceId`, `localMediaKeepDays`, `syncOnExpensiveNetwork`, `dbBackupEveryDays`, `dbBackupsToKeep`.
 
 Everything here is also in Settings. App-only keys: `processEveryMinutes` (30), `syncEveryMinutes` (10). Edits made in Settings apply immediately. If you edit the file by hand, use ◉ → ⏻ → Restart Lifelog.
