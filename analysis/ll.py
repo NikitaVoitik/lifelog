@@ -69,18 +69,21 @@ def die(msg: str) -> None:
 # ---------------------------------------------------------------- cloud access
 
 def http(path: str, body: dict | None = None, raw: bool = False):
-    if not URL or not TOKEN:
+    if not URL:
         die("set LIFELOG_URL and LIFELOG_TOKEN (or use --local on the Mac)")
+    headers = {"content-type": "application/json", "user-agent": "lifelog-analyst"}
+    if TOKEN:  # without one, an egress proxy that injects the Authorization header (a network secret) must supply it
+        headers["authorization"] = f"Bearer {TOKEN}"
     req = urllib.request.Request(URL + path, data=json.dumps(body).encode() if body is not None else None,
-                                 method="POST" if body is not None else "GET",
-                                 headers={"authorization": f"Bearer {TOKEN}", "content-type": "application/json",
-                                          "user-agent": "lifelog-analyst"})
+                                 method="POST" if body is not None else "GET", headers=headers)
     for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 data = r.read()
                 return (data, dict(r.headers)) if raw else json.loads(data)
         except urllib.error.HTTPError as e:
+            if e.code == 401:
+                die("the Worker rejected the request (401): LIFELOG_TOKEN is missing or wrong in this environment")
             if e.code < 500 or attempt == 3:
                 die(f"{path}: HTTP {e.code} {e.read()[:300].decode(errors='replace')}")
         except urllib.error.URLError as e:
