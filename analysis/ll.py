@@ -11,7 +11,8 @@ All times are the person's local time (the tool switches to their timezone itsel
     ll.py log DAY FROM TO [--full]            the time-ordered raw log (what the quick analysis sees); --full = no trimming
     ll.py ocr DAY FROM TO [--grep WORD]       all screen text, every OCR'd frame
     ll.py shot DAY HH:MM:SS                   download the screenshot nearest that second → prints a path to Read
-    ll.py shots DAY FROM TO [--every 60]      a batch: one frame per minute of activity + every window switch (paths to Read)
+    ll.py frames DAY FROM TO                  EVERY screenshot taken while active (960 px, exact repeats collapsed) → paths to Read
+    ll.py shots DAY FROM TO [--every 60]      a lighter batch: one frame per active minute + every window switch
     ll.py transcript DAY FROM TO              everything heard (mic + computer audio), with speakers
     ll.py agents DAY FROM TO [--full]         coding-agent prompts / replies (T3, Claude Code, Codex, Delta) in full
     ll.py search DAY WORDS                    where WORDS appeared that day (screen, speech, prompts, window titles)
@@ -271,17 +272,23 @@ def cmd_overview(a):
     prompts = collections.Counter()
     for e in con.execute("SELECT ts, sender FROM agent_events WHERE kind='prompt' AND ts>=? AND ts<?", (x, y)):
         prompts[(int((e["ts"] - x) // 600), e["sender"] or "?")] += 1
+    st = {int(s["ts"]): (s["idle"] or 0, s["locked"]) for s in con.execute("SELECT ts, idle, locked FROM samples WHERE ts>=? AND ts<?", (x, y))}
+    frames = collections.Counter()
+    for (ts,) in con.execute("SELECT ts FROM screenshots WHERE ts>=? AND ts<?", (x, y)):
+        idle, locked = st.get(int(ts), (0, 0))
+        if not locked and idle < thr:
+            frames[int((ts - x) // 600)] += 1
     words = collections.Counter()
     for t in con.execute("SELECT ts_start, text FROM transcripts WHERE ts_start>=? AND ts_start<?", (x, y)):
         words[int((t["ts_start"] - x) // 600)] += len((t["text"] or "").split())
-    print("from   rec  active locked keys  scroll  mic-s words  prompts(you/agt/other)  main app · window")
+    print("from   rec  active locked frames keys  scroll  mic-s words  prompts(you/agt/other)  main app · window")
     for i in range(int((y - x) // 600) + 1):
         r = rows.get(i)
         if not r:
             continue
         top = r["apps"].most_common(1)[0][0] if r["apps"] else "—"
         p = f"{prompts[(i, 'you')]}/{prompts[(i, 'agent')] + prompts[(i, 'scheduled')]}/{prompts[(i, '?')]}"
-        print(f"{hms(x + i * 600)[:5]}  {r['n']:>4} {r['act']:>6} {r['lock']:>6} {r['keys']:>5} {r['scroll']:>7} {r['mic']:>5} {words[i]:>5}  {p:>13}  {top[:70]}")
+        print(f"{hms(x + i * 600)[:5]}  {r['n']:>4} {r['act']:>6} {r['lock']:>6} {frames[i]:>6} {r['keys']:>5} {r['scroll']:>7} {r['mic']:>5} {words[i]:>5}  {p:>13}  {top[:70]}")
 
 
 def cmd_log(a):
@@ -375,6 +382,89 @@ def cmd_shots(a):
     for ts, path, what in rows:
         print(f"{hms(ts)}  {path}  ({what})")
     print(f"\n{len(rows)} distinct frames for {hms(x)}–{hms(y)} ({len(switches)} window switches). Read them in order.", file=sys.stderr)
+
+
+def pil():
+    """Pillow for shrinking frames; installed on first use (the cloud environment allows package managers)"""
+    try:
+        from PIL import Image
+        return Image
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--user", "--break-system-packages", "pillow"],
+                       capture_output=True)
+        try:
+            import site, importlib
+            sys.path.append(site.getusersitepackages())
+            importlib.invalidate_caches()
+            from PIL import Image
+            return Image
+        except ImportError:
+            return None
+
+
+def frame_list(day: str, x: float, y: float) -> list[tuple[float, str, str]]:
+    """(ts, source, app — title) for every stored screenshot in [x, y): an R2 URL path, or a local file"""
+    if LOCAL:
+        return [(r["ts"], str(L.ROOT / r["path"]), f"{r['app']} — {r['title'] or ''}") for r in local_db().execute(
+            "SELECT ts, path, app, title FROM screenshots WHERE ts>=? AND ts<? ORDER BY ts", (x, y))]
+    out = []
+    for d in sorted({dt.date.fromtimestamp(x).isoformat(), dt.date.fromtimestamp(y - 1).isoformat()}):
+        for ts, path, app, title in http(f"/api/day/{d}?device={DEVICE}").get("shots", []):
+            if x <= ts < y:
+                out.append((ts, path, f"{app} — {title}"))
+    return sorted(out)
+
+
+def cmd_frames(a):
+    """every screenshot taken while the person was active, shrunk; exact repeats collapsed"""
+    from concurrent.futures import ThreadPoolExecutor
+    x, y = span(a.day, a.frm, a.to)
+    con, thr = db_for(x, y), L.CFG["idleThresholdSeconds"]
+    state = {int(r["ts"]): (r["idle"] or 0, r["locked"]) for r in con.execute("SELECT ts, idle, locked FROM samples WHERE ts>=? AND ts<?", (x, y))}
+    frames, last_idle = [], -1e9
+    for ts, src, what in frame_list(a.day, x, y):
+        idle, locked = state.get(int(ts), (0, 0))
+        if locked:
+            continue
+        if idle >= thr:  # nobody touching anything: a frame every --idle-every s still shows watching vs. gone
+            if ts - last_idle < a.idle_every:
+                continue
+            last_idle = ts
+        frames.append((ts, src, what))
+    Image = pil()
+    out = Path(a.out or f"/tmp/lifelog-frames/{a.day}")
+    out.mkdir(parents=True, exist_ok=True)
+
+    def get(f):
+        ts, src, what = f
+        dest = out / f"{hms(ts).replace(':', '')}_{int(ts * 1000) % 1000:03d}.jpg"
+        if not dest.exists():
+            data = Path(src).read_bytes() if LOCAL else http(src, raw=True)[0]
+            if Image:
+                import io
+                im = Image.open(io.BytesIO(data)).convert("RGB")
+                if im.width > a.width:
+                    im = im.resize((a.width, round(im.height * a.width / im.width)), Image.LANCZOS)
+                im.save(dest, "JPEG", quality=72)
+            else:
+                dest.write_bytes(data)
+        return ts, dest, what
+
+    with ThreadPoolExecutor(12) as ex:
+        got = list(ex.map(get, frames))
+    rows, prev_sig = [], None
+    for ts, dest, what in got:
+        sig = dest.read_bytes() if not Image else Image.open(dest).convert("L").resize((96, 60)).tobytes()
+        if sig == prev_sig:  # pixel-identical (at thumbnail scale) to the previous kept frame
+            rows[-1][3] = ts
+            continue
+        prev_sig = sig
+        rows.append([ts, dest, what, None])
+    for ts, dest, what, until in rows:
+        print(f"{hms(ts)}  {dest}  ({what})" + (f"  — unchanged until {hms(until)}" if until else ""))
+    print(f"\n{len(rows)} frames to Read ({len(frames)} active screenshots, {len(frames) - len(rows)} exact repeats collapsed)"
+          + ("" if Image else "; Pillow unavailable, so frames are full size"), file=sys.stderr)
 
 
 def cmd_transcript(a):
@@ -541,6 +631,8 @@ def main():
         if name == "ocr":
             p.add_argument("--grep")
     p = sub.add_parser("shot"); p.add_argument("day"); p.add_argument("time"); p.add_argument("--out")
+    p = sub.add_parser("frames"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
+    p.add_argument("--width", type=int, default=960); p.add_argument("--idle-every", type=int, default=120); p.add_argument("--out")
     p = sub.add_parser("shots"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
     p.add_argument("--every", type=int, default=60); p.add_argument("--max", type=int, default=60); p.add_argument("--out")
     p = sub.add_parser("search"); p.add_argument("day"); p.add_argument("words", nargs="+")

@@ -9,13 +9,13 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
 1. `ll.py guide` once. It explains every line type in the log and lists the categories.
 2. `ll.py log DAY FROM TO --full`. This is the whole chunk, untrimmed: 10-second activity buckets, window switches, screen
    text (OCR), speech, and coding-agent prompts/replies. If it is very long, read it in ~20-minute pieces.
-3. `ll.py shots DAY FROM TO`. This downloads a frame for every minute the person was active plus one after every window
-   switch, and prints `time path (app — window)`. **Read every one of them, in time order**, next to the log. They are
-   the ground truth: OCR is noisy and blind to images, video and layout. The screenshots tell you which tab or message
-   was open, whether it was code or a chat, what video was playing, and whether the screen changed while there was no input.
+3. `ll.py frames DAY FROM TO`. This downloads **every** screenshot taken while the person was active (the recorder saves
+   a frame whenever the screen changes, up to 1/s), shrunk to 960 px, and prints `time path (app — window)`. **Read all of
+   them, in time order, without skipping**, alongside the log. Read them in batches of ~20 and keep running notes of
+   what changes. They are the ground truth: OCR is noisy and blind to images, video and layout. They show which tab or
+   message was open, what was being typed, what video was playing, and whether the screen changed with no input.
 4. Then dig wherever it's still unclear, without guessing:
-   - `ll.py shot DAY HH:MM:SS` gives one more frame, then Read it. Add these during dense stretches (fast switching,
-     typing, scrolling a feed), every 10–20 s if needed, and wherever the batch left a gap.
+   - If text in a frame is too small to read, `ll.py shot DAY HH:MM:SS` gives that moment at full resolution.
    - `ll.py ocr DAY HH:MM HH:MM [--grep WORD]` gives the full screen text of a short span (the log only shows what changed).
    - `ll.py transcript DAY HH:MM HH:MM` gives everything said. "Me" is the person; others are named voices or "voice #N".
    - `ll.py agents DAY HH:MM HH:MM --full` gives complete prompts and replies. **PROMPT FROM THE USER is certain** (they typed or
