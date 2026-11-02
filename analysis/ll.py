@@ -11,6 +11,7 @@ All times are the person's local time (the tool switches to their timezone itsel
     ll.py log DAY FROM TO [--full]            the time-ordered raw log (what the quick analysis sees); --full = no trimming
     ll.py ocr DAY FROM TO [--grep WORD]       all screen text, every OCR'd frame
     ll.py shot DAY HH:MM:SS                   download the screenshot nearest that second → prints a path to Read
+    ll.py shots DAY FROM TO [--every 60]      a batch: one frame per minute of activity + every window switch (paths to Read)
     ll.py transcript DAY FROM TO              everything heard (mic + computer audio), with speakers
     ll.py agents DAY FROM TO [--full]         coding-agent prompts / replies (T3, Claude Code, Codex, Delta) in full
     ll.py search DAY WORDS                    where WORDS appeared that day (screen, speech, prompts, window titles)
@@ -324,6 +325,58 @@ def cmd_shot(a):
     print(f"{dest}  (taken {hms(real)}, {urllib.parse.unquote(h.get('x-shot-app', ''))} — {urllib.parse.unquote(h.get('x-shot-title', ''))})")
 
 
+def fetch_shot(day: str, ts: float, out: Path) -> tuple[float, str, str] | None:
+    """the screenshot nearest ts → (real ts, path, app — title), or None"""
+    if LOCAL:
+        r = local_db().execute("SELECT * FROM screenshots WHERE ts BETWEEN ? AND ? ORDER BY ABS(ts-?) LIMIT 1", (ts - 120, ts + 120, ts)).fetchone()
+        if not r or not (L.ROOT / r["path"]).exists():
+            return None
+        dest = out / f"{day}_{hms(r['ts']).replace(':', '')}.jpg"
+        dest.write_bytes((L.ROOT / r["path"]).read_bytes())
+        return r["ts"], str(dest), f"{r['app']} — {r['title'] or ''}"
+    try:
+        req = urllib.request.Request(f"{URL}/api/shot?device={DEVICE}&day={day}&ts={ts}",
+                                     headers={"user-agent": "lifelog-analyst", **({"authorization": f"Bearer {TOKEN}"} if TOKEN else {})})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data, h = r.read(), {k.lower(): v for k, v in r.headers.items()}
+    except urllib.error.HTTPError:
+        return None
+    real = float(h.get("x-shot-ts", ts))
+    dest = out / f"{day}_{hms(real).replace(':', '')}.jpg"
+    dest.write_bytes(data)
+    return real, str(dest), f"{urllib.parse.unquote(h.get('x-shot-app', ''))} — {urllib.parse.unquote(h.get('x-shot-title', ''))}"
+
+
+def cmd_shots(a):
+    """a batch of frames for a span: one every --every seconds while the person is active, plus every window switch"""
+    from concurrent.futures import ThreadPoolExecutor
+    x, y = span(a.day, a.frm, a.to)
+    con, thr = db_for(x, y), L.CFG["idleThresholdSeconds"]
+    switches, grid, prev, last_grid = [], [], None, -1e9
+    for smp in con.execute("SELECT ts, app, title, url, idle, locked FROM samples WHERE ts>=? AND ts<? ORDER BY ts", (x, y)):
+        ctx = (smp["app"], smp["title"], smp["url"])
+        if ctx != prev:
+            switches.append(smp["ts"] + 2)  # a moment after the switch, once the new window has drawn
+            prev = ctx
+        if not smp["locked"] and (smp["idle"] or 0) < thr and smp["ts"] - last_grid >= a.every:
+            grid.append(smp["ts"])
+            last_grid = smp["ts"]
+    targets = sorted(set(switches) | set(grid))
+    if len(targets) > a.max:  # keep every switch, thin the grid
+        room = max(0, a.max - len(switches))
+        step = max(1, len(grid) // room) if room else len(grid) + 1
+        targets = sorted(set(switches[:a.max]) | set(grid[::step][:room]))
+    out = Path(a.out or "/tmp/lifelog-shots")
+    out.mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(8) as ex:
+        got = list(ex.map(lambda t: fetch_shot(a.day, t, out), targets))
+    seen = set()
+    rows = sorted(g for g in got if g and g[1] not in seen and not seen.add(g[1]))
+    for ts, path, what in rows:
+        print(f"{hms(ts)}  {path}  ({what})")
+    print(f"\n{len(rows)} distinct frames for {hms(x)}–{hms(y)} ({len(switches)} window switches). Read them in order.", file=sys.stderr)
+
+
 def cmd_transcript(a):
     x, y = span(a.day, a.frm, a.to)
     con = db_for(x, y)
@@ -488,6 +541,8 @@ def main():
         if name == "ocr":
             p.add_argument("--grep")
     p = sub.add_parser("shot"); p.add_argument("day"); p.add_argument("time"); p.add_argument("--out")
+    p = sub.add_parser("shots"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
+    p.add_argument("--every", type=int, default=60); p.add_argument("--max", type=int, default=60); p.add_argument("--out")
     p = sub.add_parser("search"); p.add_argument("day"); p.add_argument("words", nargs="+")
     p = sub.add_parser("timeline"); p.add_argument("day")
     p = sub.add_parser("sleep"); p.add_argument("--days", type=int, default=7)

@@ -18,10 +18,12 @@ say so in your final message. Never print the token.
    and `ll.py timeline DAY` for the day so far, to see what came before.
 3. **Plan chunks.** Split the range into contiguous chunks that cover it exactly. Put boundaries at natural breaks: long
    idle, screen locked, or an app or topic change.
-   - Active stretches: 30–60 min each (shorter when it's dense: lots of keys, prompts, speech).
+   - Active stretches: 20–30 min each, about 15 min when it's dense (lots of switching, keys, prompts, speech). Each
+     agent reads a screenshot for every active minute plus every window switch, so longer chunks overflow its context.
    - Stretches with no laptop input (locked, idle, no data): one chunk each. Don't spend an agent on them unless the overview
      shows speech or prompts from the user inside them.
-   - Aim for at most ~12 agents per run.
+   - Aim for at most ~20 agents per run. If the range needs more, shorten the range: do the first part well and leave
+     the rest for the next run.
 4. **Run the swarm.** Launch one agent per active chunk, all at once, in parallel (Agent tool, `model: "sonnet"`). Each
    prompt is the full text of `analysis/CHUNK.md` followed by:
    - DAY, FROM, TO, OUTPUT (`/tmp/deep/chunk_NN.json`, numbered in time order);

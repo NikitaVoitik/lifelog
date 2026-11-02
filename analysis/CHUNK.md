@@ -9,17 +9,19 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
 1. `ll.py guide` once. It explains every line type in the log and lists the categories.
 2. `ll.py log DAY FROM TO --full`. This is the whole chunk, untrimmed: 10-second activity buckets, window switches, screen
    text (OCR), speech, and coding-agent prompts/replies. If it is very long, read it in ~20-minute pieces.
-3. Dig wherever the log leaves the activity unclear. Don't guess when you can look:
-   - `ll.py shot DAY HH:MM:SS`, then **Read** the printed image path: what was actually on screen (which tab, which message,
-     video or text, which part of the code). OCR text is noisy and misses images and video, so screenshots are required,
-     not optional: look at least one per ~3 minutes of active time, and one at every switch to a different app, thread or
-     page (up to ~40 per chunk). Say in `detail` when a segment rests on what a screenshot showed.
+3. `ll.py shots DAY FROM TO`. This downloads a frame for every minute the person was active plus one after every window
+   switch, and prints `time path (app — window)`. **Read every one of them, in time order**, next to the log. They are
+   the ground truth: OCR is noisy and blind to images, video and layout. The screenshots tell you which tab or message
+   was open, whether it was code or a chat, what video was playing, and whether the screen changed while there was no input.
+4. Then dig wherever it's still unclear, without guessing:
+   - `ll.py shot DAY HH:MM:SS` gives one more frame, then Read it. Add these during dense stretches (fast switching,
+     typing, scrolling a feed), every 10–20 s if needed, and wherever the batch left a gap.
    - `ll.py ocr DAY HH:MM HH:MM [--grep WORD]` gives the full screen text of a short span (the log only shows what changed).
    - `ll.py transcript DAY HH:MM HH:MM` gives everything said. "Me" is the person; others are named voices or "voice #N".
    - `ll.py agents DAY HH:MM HH:MM --full` gives complete prompts and replies. **PROMPT FROM THE USER is certain** (they typed or
      dictated it, or sent it from their phone). Prompts from other agents or schedules are background work, never the person's time.
-4. Write the segments file to OUTPUT (format below), then run `ll.py check OUTPUT` and fix it until it says ok.
-5. Reply in 3–6 lines: the story of the chunk, plus anything the coordinator must know. For example: an activity that runs past
+5. Write the segments file to OUTPUT (format below), then run `ll.py check OUTPUT` and fix it until it says ok.
+6. Reply in 3–6 lines: the story of the chunk, plus anything the coordinator must know. For example: an activity that runs past
    TO, a stretch you think is sleep or being out, people and project names you identified, or anything uncertain.
 
 ## Precision
@@ -30,7 +32,8 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
   as ~5–10 s when something distinct happened. Don't split on noise like a 2-second app flick.
 - **activity**: ≤ 90 chars, concrete. Name the thing: "Typing prompt in T3 'Why Blort Auth Cookies Changed': asks why
   the proxy was needed", "Scrolling X home feed", "Reading Codex reply on usage QA".
-- **detail**: 1–2 sentences of evidence: what was typed, read, said or watched. Don't invent. If unsure, say what the evidence suggests.
+- **detail**: 1–2 sentences of evidence: what was typed, read, said or watched. Prefer what the screenshots showed
+  (e.g. "screenshot 14:02:10: X thread about Sora pricing"). Don't invent. If unsure, say what the evidence suggests.
 - **category**: one from `ll.py guide`. Long no-input stretches get "away" (or "idle at desk" if they're clearly present:
   reading, watching, talking). Leave sleep decisions to the coordinator unless the chunk is entirely an obvious night.
 - **app**: the main app or site ("T3 Code", "x.com", "Zed", "Telegram").
