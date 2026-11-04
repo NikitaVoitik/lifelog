@@ -11,13 +11,18 @@
 //   GET  /api/deep/status?device=mac       → raw hours available + deep-analysis runs so far (for the cloud analyst)
 //   POST /api/deep/ingest                  → { device, ts_start, ts_end, segments: [{s,e,c,activity,detail,app}], summaries?, note? }
 //   GET  /api/deep/since?device&since      → deep runs (with segments) + summaries created after `since` (the Mac pulls these)
+//   POST /api/phone/events                 → { device, events: [{id, ts, kind, data}] }   (the iPhone app; idempotent by id)
+//   GET  /api/phone/since?device&seq       → phone events after server sequence number `seq` (the Mac pulls these)
+//   GET  /api/phone/status?device          → last event the server has from the phone
 //
 // Auth: "Authorization: Bearer <API_TOKEN>" or the ll_token cookie (the viewer sets it so <img>/<audio> work).
 // ANALYST_TOKEN (optional, for the cloud analysis agent) may read everything but only write via /api/deep/ingest.
+// PHONE_TOKEN (optional, baked into the iPhone app) may only upload: PUT /api/upload/<its device>/…, POST /api/phone/events,
+// GET /api/phone/status. It can't read anything else.
 
 const CATEGORIES = [
   "coding & AI agents", "communication", "voice & calls", "social media", "entertainment",
-  "browsing & research", "writing & planning", "idle at desk", "away", "other",
+  "browsing & research", "writing & planning", "on phone", "idle at desk", "away", "other",
 ];
 const DEEP_CATEGORIES = new Set([...CATEGORIES, "sleep"]);
 
@@ -218,6 +223,38 @@ function chunks(arr) {
   return out;
 }
 
+async function phoneEvents(env, body) {
+  const device = String(body.device || "").trim();
+  if (!/^[a-z0-9_-]{1,40}$/i.test(device)) return json({ error: "bad device id" }, 400);
+  const evs = (Array.isArray(body.events) ? body.events : []).filter(e =>
+    e && typeof e.id === "string" && e.id.length <= 64 && Number.isFinite(+e.ts) && typeof e.kind === "string" && e.kind.length <= 32);
+  if (evs.length > 2000) return json({ error: "at most 2000 events per request" }, 400);
+  const now = Date.now() / 1000;
+  const stmts = [
+    env.DB.prepare("INSERT INTO devices(id,name,kind,last_seen) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen, name=COALESCE(excluded.name, devices.name), kind=COALESCE(excluded.kind, devices.kind)")
+      .bind(device, body.deviceName ?? null, "phone", now),
+  ];
+  const rows = evs.map(e => ({ id: e.id, ts: +e.ts, kind: e.kind, data: JSON.stringify(e.data ?? {}).slice(0, 8000) }));
+  for (const c of chunks(rows, 200)) stmts.push(env.DB.prepare(
+    `INSERT OR IGNORE INTO phone_events(device, id, ts, kind, data, received) SELECT ?1, json_extract(value,'$.id'),
+       json_extract(value,'$.ts'), json_extract(value,'$.kind'), json_extract(value,'$.data'), ?2 FROM json_each(?3)`)
+    .bind(device, now, JSON.stringify(c)));
+  await env.DB.batch(stmts);
+  return json({ ok: true, received: rows.length });
+}
+
+async function phoneSince(env, device, seq) {
+  const { results } = await env.DB.prepare(
+    "SELECT seq, id, ts, kind, data, received FROM phone_events WHERE device=? AND seq>? ORDER BY seq LIMIT 5000").bind(device, seq).all();
+  return { events: results.map(r => ({ ...r, data: JSON.parse(r.data || "{}") })), more: results.length === 5000 };
+}
+
+async function phoneStatus(env, device) {
+  const last = await env.DB.prepare("SELECT ts, kind, received FROM phone_events WHERE device=? ORDER BY seq DESC LIMIT 1").bind(device).first();
+  const n = await env.DB.prepare("SELECT COUNT(*) AS n FROM phone_events WHERE device=? AND received>?").bind(device, Date.now() / 1000 - 86400).first();
+  return { ok: true, device, last, last24h: n ? n.n : 0 };
+}
+
 async function ingest(env, body) {
   const device = String(body.device || "").trim();
   if (!/^[a-z0-9_-]{1,40}$/i.test(device)) return json({ error: "bad device id" }, 400);
@@ -293,6 +330,9 @@ async function route(req, env, url) {
   if (p === "/api/deep/since" && req.method === "GET") return json(await deepSince(env, device, +(url.searchParams.get("since") || 0)));
   if (p === "/api/deep/ingest" && req.method === "POST") return deepIngest(env, await req.json());
   if (p === "/api/ingest" && req.method === "POST") return ingest(env, await req.json());
+  if (p === "/api/phone/events" && req.method === "POST") return phoneEvents(env, await req.json());
+  if (p === "/api/phone/since" && req.method === "GET") return json(await phoneSince(env, device, +(url.searchParams.get("seq") || 0)));
+  if (p === "/api/phone/status" && req.method === "GET") return json(await phoneStatus(env, device));
   if ((m = p.match(/^\/api\/upload\/([a-z0-9_-]{1,40})\/(.+)$/i)) && req.method === "PUT") {
     const key = `devices/${m[1]}/${decodeURIComponent(m[2])}`;
     if (key.includes("..")) return json({ error: "bad path" }, 400);
@@ -309,10 +349,25 @@ export default {
     if (!env.API_TOKEN) return json({ error: "API_TOKEN secret not set" }, 500);
     const tok = tokenFrom(req);
     if (!safeEqual(tok, env.API_TOKEN)) {
-      // the cloud analyst's token: read anything, write only its own analysis results
-      const analyst = env.ANALYST_TOKEN && safeEqual(tok, env.ANALYST_TOKEN);
-      if (!analyst) return json({ error: "unauthorized" }, 401);
-      if (req.method !== "GET" && url.pathname !== "/api/deep/ingest") return json({ error: "analyst token is read-only here" }, 403);
+      if (env.PHONE_TOKEN && safeEqual(tok, env.PHONE_TOKEN)) {
+        // the phone's token: write-only (its own uploads and events) plus its own status
+        const dev = env.PHONE_DEVICE || "iphone", p = url.pathname;
+        const ok = (req.method === "PUT" && p.startsWith(`/api/upload/${dev}/`))
+          || (req.method === "POST" && p === "/api/phone/events")
+          || (req.method === "GET" && p === "/api/phone/status");
+        if (!ok) return json({ error: "phone token can only upload" }, 403);
+        if (p === "/api/phone/events") {
+          const body = await req.json();
+          if (body.device !== dev) return json({ error: "wrong device for this token" }, 403);
+          try { return await phoneEvents(env, body); } catch (e) { return json({ error: String(e && e.message || e) }, 500); }
+        }
+        if (p === "/api/phone/status") return json(await phoneStatus(env, dev));
+      } else {
+        // the cloud analyst's token: read anything, write only its own analysis results
+        const analyst = env.ANALYST_TOKEN && safeEqual(tok, env.ANALYST_TOKEN);
+        if (!analyst) return json({ error: "unauthorized" }, 401);
+        if (req.method !== "GET" && url.pathname !== "/api/deep/ingest") return json({ error: "analyst token is read-only here" }, 403);
+      }
     }
     try {
       return await route(req, env, url);

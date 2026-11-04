@@ -70,6 +70,7 @@ DEFAULTS = {
     "dbBackupEveryDays": 1,
     "dbBackupsToKeep": 7,
     "wranglerLocal": "",       # testing only: persist dir for `wrangler --local`
+    "phoneDeviceId": "iphone", # the iPhone app's device id in the cloud ("" = don't pull phone data)
 }
 
 CATEGORIES = [
@@ -80,6 +81,7 @@ CATEGORIES = [
     "entertainment",
     "browsing & research",
     "writing & planning",
+    "on phone",
     "idle at desk",
     "away",
     "sleep",
@@ -131,6 +133,10 @@ CREATE TABLE IF NOT EXISTS deep_runs(id INTEGER PRIMARY KEY, ts_start REAL, ts_e
 CREATE TABLE IF NOT EXISTS deep_segments(ts_start REAL PRIMARY KEY, ts_end REAL, category TEXT, activity TEXT, detail TEXT,
   app TEXT, run_id INTEGER);
 CREATE TABLE IF NOT EXISTS deep_summaries(day TEXT PRIMARY KEY, text TEXT, updated REAL);
+-- the iPhone app's facts (screen on/off/lock, calls, motion, steps, places, battery, sound levels, audio chunks), pulled
+-- from the cloud; data is JSON
+CREATE TABLE IF NOT EXISTS phone_events(id TEXT PRIMARY KEY, seq INTEGER, ts REAL, kind TEXT, data TEXT, received REAL);
+CREATE INDEX IF NOT EXISTS phone_events_ts ON phone_events(ts);
 CREATE TABLE IF NOT EXISTS voices(id INTEGER PRIMARY KEY, name TEXT, embedding TEXT, n INTEGER, seconds REAL,
   first_heard REAL, last_heard REAL);
 """
@@ -217,7 +223,7 @@ def pending_chunks(con, limit: int | None) -> list:
     """closed chunks not transcribed yet; silent / missing ones are marked and skipped here"""
     out = []
     for r in con.execute("SELECT * FROM audio_chunks WHERE transcribed=0 AND ts_end IS NOT NULL ORDER BY ts_start").fetchall():
-        threshold = CFG["micSpeechThresholdDb"] if r["source"] == "mic" else CFG["sysSoundThresholdDb"]
+        threshold = CFG["micSpeechThresholdDb"] if r["source"] in ("mic", "phone") else CFG["sysSoundThresholdDb"]
         if not (ROOT / r["path"]).exists():
             con.execute("UPDATE audio_chunks SET transcribed=3 WHERE id=?", (r["id"],))
         elif r["peak_db"] is not None and r["peak_db"] < threshold:
@@ -697,7 +703,8 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
     events = con.execute("SELECT * FROM events WHERE ts>=? AND ts<? ORDER BY ts", (start, end)).fetchall()
     agents = con.execute("SELECT * FROM agent_events WHERE ts>=? AND ts<? ORDER BY ts", (start, end)).fetchall()
     threads = t3_threads(con)
-    if not samples:
+    phone = phone_entries(con, start, end)
+    if not samples and not phone:
         return "", 0
 
     # 10-second buckets
@@ -825,7 +832,7 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
 
     trans_entries = []
     for t in trans:
-        who = "MIC" if t["source"] == "mic" else "COMPUTER AUDIO"
+        who = {"mic": "MIC", "phone": "PHONE MIC"}.get(t["source"], "COMPUTER AUDIO")
         label = voice_label(t["vname"], t["speaker_id"])
         if label:
             who += f" · {label}"
@@ -856,14 +863,128 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
             ev_entries.append((a["ts"], 4, f"    [AGENT FINISHED · {label} {at}] “{text[:100 if short else 220]}”"))
 
     def render(ocr_list):
-        allents = sorted(entries + ocr_list + trans_entries + ev_entries, key=lambda e: (e[0], e[1]))
+        allents = sorted(entries + ocr_list + trans_entries + ev_entries + phone, key=lambda e: (e[0], e[1]))
         return "\n".join(e[2] for e in allents)
 
     text = render(ocr_entries)
     while len(text) > max_chars and ocr_entries:
         ocr_entries = ocr_entries[::2] if len(ocr_entries) > 4 else []
         text = render(ocr_entries)
-    return text, len(samples)
+    return text, max(len(samples), len(phone))
+
+
+def _pdata(e) -> dict:
+    try:
+        return json.loads(e["data"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def phone_entries(con, start: float, end: float) -> list[tuple[float, int, str]]:
+    """The iPhone's facts in [start, end) as log lines: screen sessions, sound runs, calls, motion, steps, places, battery…"""
+    try:
+        evs = con.execute("SELECT * FROM phone_events WHERE ts>=? AND ts<? ORDER BY ts", (start - 3600, end)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out: list[tuple[float, int, str]] = []
+    add = lambda ts, text: out.append((ts, 0, text)) if start <= ts < end else None
+
+    # screen: unlocked sessions and glances (screen on without unlocking)
+    on_at = unlock_at = None
+    used = False  # unlocked at some point since the screen came on
+    for e in evs:
+        if e["kind"] != "screen":
+            continue
+        st, ts = _pdata(e).get("state"), e["ts"]
+        if st == "on":
+            on_at = on_at or ts
+        elif st == "unlocked":
+            unlock_at = unlock_at or ts
+            on_at = on_at or ts
+            used = True
+        elif st in ("locked", "off"):
+            if unlock_at is not None:
+                if ts > start:
+                    add(max(unlock_at, start), f"{hms(max(unlock_at, start))}–{hms(ts)}  [PHONE UNLOCKED, in use {fmt_dur(ts - unlock_at)}]")
+            elif on_at is not None and st == "off" and not used and ts - on_at >= 2:
+                add(on_at, f"{hms(on_at)}–{hms(ts)}  [PHONE screen on, not unlocked ({fmt_dur(ts - on_at)}) — glance / notification]")
+            if st == "off":
+                on_at, used = None, False
+            unlock_at = None
+    if unlock_at is not None:
+        add(max(unlock_at, start), f"{hms(max(unlock_at, start))}–…  [PHONE UNLOCKED, still in use at {hms(min(end, time.time()))}]")
+
+    # sound around the phone, per minute → runs of the same kind
+    run = None
+    def flush_sound():
+        if run and run["b"] > start:
+            a = max(run["a"], start)
+            kind = run["k"]
+            what = {"quiet": "quiet", "sound": "sound / voices nearby"}[kind[0]]
+            other = ", ANOTHER APP PLAYING AUDIO (music/video/podcast)" if kind[1] else ""
+            add(a, f"{hms(a)}–{hms(run['b'])}  [PHONE MIC: {what}{other}; avg {run['avg'] / run['n']:.0f}dB, peak {run['peak']:.0f}dB]")
+    for e in evs:
+        if e["kind"] != "sound":
+            continue
+        d = _pdata(e)
+        k = ("sound" if (d.get("loud_s") or 0) >= 3 else "quiet", bool(d.get("other_audio")))
+        if run and run["k"] == k and e["ts"] - run["b"] <= 61 and run["b"] - run["a"] < 30 * 60:
+            run["b"] = e["ts"] + 60; run["n"] += 1; run["avg"] += d.get("avg_db", -160); run["peak"] = max(run["peak"], d.get("peak_db", -160))
+        else:
+            flush_sound()
+            run = {"a": e["ts"], "b": e["ts"] + 60, "k": k, "n": 1, "avg": d.get("avg_db", -160), "peak": d.get("peak_db", -160)}
+    flush_sound()
+
+    # steps → walks (consecutive 5-minute bins)
+    walk = None
+    def flush_walk():
+        if walk:
+            add(walk["a"], f"{hms(walk['a'])}–{hms(walk['b'])}  [PHONE STEPS: {walk['steps']:,} steps, ~{walk['m']:,} m]")
+    for e in evs:
+        if e["kind"] != "steps":
+            continue
+        d = _pdata(e)
+        b = d.get("to") or e["ts"] + 300
+        if walk and e["ts"] - walk["b"] <= 1:
+            walk["b"] = b; walk["steps"] += d.get("steps", 0); walk["m"] += d.get("meters", 0)
+        else:
+            flush_walk()
+            walk = {"a": e["ts"], "b": b, "steps": d.get("steps", 0), "m": d.get("meters", 0)}
+    flush_walk()
+
+    last_out = None
+    for e in evs:
+        d, ts, k = _pdata(e), e["ts"], e["kind"]
+        if k == "call":
+            add(ts, f"{hms(ts)}  [PHONE CALL {d.get('state')}{' (outgoing)' if d.get('outgoing') else ''}"
+                    f"{' on hold' if d.get('on_hold') else ''} · call {d.get('call', '')}]")
+        elif k == "motion":
+            add(ts, f"{hms(ts)}  [PHONE MOTION: {d.get('activity')} ({d.get('confidence')} confidence)]")
+        elif k == "visit":
+            place = d.get("place") or f"{d.get('lat', 0):.4f},{d.get('lon', 0):.4f}"
+            if d.get("arrival") and start <= d["arrival"] < end and not d.get("departure"):
+                add(d["arrival"], f"{hms(d['arrival'])}  [PHONE PLACE: arrived at {place} (±{d.get('acc')} m)]")
+            if d.get("departure"):
+                since = f" (there since {hms(d['arrival'])})" if d.get("arrival") else ""
+                add(d["departure"], f"{hms(d['departure'])}  [PHONE PLACE: left {place}{since}]")
+        elif k == "location":
+            sp = d.get("speed", -1)
+            add(ts, f"{hms(ts)}  [PHONE LOCATION: {d.get('lat', 0):.4f},{d.get('lon', 0):.4f} ±{d.get('acc')} m"
+                    + (f", moving {sp * 3.6:.0f} km/h" if sp and sp > 0.5 else "") + "]")
+        elif k == "battery" and "state" in d:
+            add(ts, f"{hms(ts)}  [PHONE BATTERY: {d.get('state')} {d.get('level')}%]")
+        elif k == "route":
+            o = ", ".join(x.split(":", 1)[-1] for x in d.get("outputs", []))
+            if o != last_out:
+                add(ts, f"{hms(ts)}  [PHONE AUDIO OUTPUT: {o}]")
+                last_out = o
+        elif k == "mic" and d.get("state") in ("on", "off", "interrupted", "failed", "stalled"):
+            why = d.get("reason") or d.get("error") or ""
+            add(ts, f"{hms(ts)}  [PHONE RECORDER: mic {d.get('state')}{' — ' + why if why else ''}]")
+        elif k == "app" and d.get("state") in ("launch", "terminate"):
+            add(ts, f"{hms(ts)}  [PHONE RECORDER: app {'started' if d['state'] == 'launch' else 'terminated (phone record stops until reopened)'}"
+                    f"{' — ' + d['reason'] if d.get('reason') else ''}]")
+    return out
 
 
 SYSTEM_PROMPT = """You reconstruct exactly how a person spent their time on their laptop, from a raw activity log.
@@ -894,6 +1015,15 @@ The log is time-ordered (local time, HH:MM:SS). Line types:
   working: the user was waiting, multitasking, or watching it. After FINISHED they usually read the reply.
   "on <host>" means the agent ran on that remote machine (e.g. a devbox over ssh) — still the user's own work.
 - "@ T3 Code — … — T3 thread “title” (project)" : the T3 thread the user had open on screen.
+- "[PHONE …]" lines come from the user's iPhone (it's always with them, so it covers time away from the laptop too):
+  "PHONE UNLOCKED, in use 4m" = they were using their phone (which app is unknown); "PHONE screen on, not unlocked" = a glance
+  or a notification; "PHONE MIC" = sound around the phone per run of minutes ("ANOTHER APP PLAYING AUDIO" = music, a video or
+  a podcast playing on the phone); "[PHONE MIC · speaker …]" = speech transcribed from the phone's mic ("Me" is the user);
+  "PHONE CALL" = a phone/FaceTime/WhatsApp call; "PHONE MOTION" = walking / running / cycling / vehicle / still;
+  "PHONE STEPS" = walking; "PHONE PLACE" = arrived at / left a place; "PHONE LOCATION" = a move of ~500 m+;
+  "PHONE BATTERY: charging" (at night it often means the phone is on the nightstand); "PHONE RECORDER" = the phone stopped or
+  resumed recording (gaps in phone data are not evidence of anything).
+  Phone use while the laptop is idle is "on phone" time; phone use during laptop work is a distraction worth naming.
 
 Produce segments that cover the whole window contiguously (from the first to the last timestamp given), in order, no overlaps.
 Be granular and concrete: split whenever the activity really changes — e.g. "typing a prompt in T3 Code thread 'lifelog app'" for 3 minutes,
@@ -902,7 +1032,7 @@ unless they're meaningful; merge noise like a 5-second app switch into the surro
 - activity: short, specific, names the thing (app + which chat/thread/file/site/video/person). ≤ 90 chars.
 - detail: 1–2 sentences of concrete specifics you can actually see in the log (what was asked, what topic was discussed, which tweets/videos).
   Don't invent; if unsure, say what the evidence suggests.
-- category: one of the allowed values. "voice & calls" for talking (in person near the laptop or on a call). "idle at desk" = present but not interacting
+- category: one of the allowed values. "on phone" = using the phone (unlocked) and not the laptop. "voice & calls" for talking (in person near the laptop or on a call). "idle at desk" = present but not interacting
   (reading long text without scrolling, thinking). "away" = not at the laptop (long idle, locked, asleep, no data).
   Use "away" for absences even at night — a second pass looks at long absences across the whole day and decides if they were sleep.
 - app: the main app or website (e.g. "T3 Code", "x.com", "YouTube", "Discord").
@@ -1064,6 +1194,9 @@ Coding agents (Claude Code, Codex, Delta — on this Mac or remote machines) kee
 activity during a stretch is not evidence they were awake or present; only their own input, unlocking the screen, or their voice is.
 Messages they themselves sent to their agents (listed per stretch) are certain: one sent from their phone means they were awake
 then, wherever they were.
+Their iPhone's record is strong evidence when present: unlocking it means awake; walking / a vehicle / arriving at or leaving a
+place means out; a quiet phone that's charging and still for hours at night means asleep. A phone that recorded nothing (no
+events at all) tells you nothing.
 If they probably fell asleep at the desk or left the laptop running, set start to when sleep most likely began (and end to when
 they most likely woke) — otherwise leave start/end empty to mean the whole stretch.
 Kinds: "sleep" (main sleep), "nap", "away" (awake, elsewhere), "at_desk" (actually at the laptop — watching, reading, thinking;
@@ -1143,6 +1276,10 @@ def describe_absence(con, i: int, ab: dict, last_data: float) -> str:
                      "WHERE t.ts_start>=? AND t.ts_start<? ORDER BY t.ts_start LIMIT 10", (a, b)).fetchall()
     for t in tr:
         lines.append(f"  heard {hms(t['ts_start'])[:5]} [{t['source']} · {voice_label(t['name'], t['speaker_id']) if t['speaker_id'] else '?'}] “{t['text'][:120]}”")
+    ph = phone_entries(con, a, b)
+    if ph:
+        lines.append(f"Their iPhone during this stretch ({len(ph)} facts):")
+        lines += ["  " + t for _, _, t in sorted(ph)[:40]]
     before = con.execute("SELECT * FROM segments WHERE ts_end<=? AND category NOT IN ('away','sleep') ORDER BY ts_end DESC LIMIT 3", (a + 1,)).fetchall()
     after = con.execute("SELECT * FROM segments WHERE ts_start>=? AND category NOT IN ('away','sleep') ORDER BY ts_start LIMIT 3", (b - 1,)).fetchall()
     if before:
@@ -1417,6 +1554,10 @@ def status(con: sqlite3.Connection) -> None:
     who = dict(con.execute("SELECT COALESCE(sender,'unknown'), COUNT(*) FROM agent_events WHERE ts>=? AND kind='prompt' GROUP BY 1", (ds,)).fetchall())
     print(f"agents     : {sum(n for _, n in ag)} prompts today" + (" (" + ", ".join(f"{h} {n}" for h, n in ag) + ")" if ag else "")
           + (f"; from you {who.get('you', 0)}, agents {who.get('agent', 0)}, schedules {who.get('scheduled', 0)}, sender unknown {who.get('unknown', 0)}" if who else ""))
+    pl = con.execute("SELECT MAX(ts), COUNT(*) FROM phone_events WHERE ts>=?", (ds,)).fetchone()
+    if pl[1] or CFG.get("phoneDeviceId"):
+        print(f"phone      : {pl[1]} events today" + (f", latest {fmt_dur(time.time() - pl[0])} ago" if pl[0] else "")
+              + f"; {q('SELECT COUNT(*) FROM audio_chunks WHERE source=? AND ts_start>=?', 'phone', ds)} audio chunks")
     engine = "Parakeet Ultra + Nemotron 3 speakers" if CFG["transcriber"] == "fluidaudio" and Path(CFG["asrBinary"]).expanduser().exists() else "whisper"
     me = con.execute("SELECT COUNT(*) FROM voices WHERE lower(name)='me'").fetchone()[0]
     print(f"speech     : {engine}; {q('SELECT COUNT(*) FROM voices')} voices known"
@@ -1628,7 +1769,7 @@ def upload_media(con, now: float) -> tuple[int, int]:
                 print(f"  ↑ screens {day} {slot}: {len(chunk)} frames")
         # audio → hourly bundles (only when every chunk that started in the hour is closed)
         hours: dict[str, list] = collections.defaultdict(list)
-        for r in con.execute("SELECT * FROM audio_chunks WHERE ts_start>=? AND ts_start<? ORDER BY ts_start", (ds, de)):
+        for r in con.execute("SELECT * FROM audio_chunks WHERE ts_start>=? AND ts_start<? AND source!='phone' ORDER BY ts_start", (ds, de)):
             hours[f"{dt.datetime.fromtimestamp(r['ts_start']).hour:02d}"].append(r)
         for hour, rows in sorted(hours.items()):
             if any(r["ts_end"] is None for r in rows) or ds + (int(hour) + 1) * 3600 > now - 60:
@@ -1652,7 +1793,7 @@ def local_tz() -> str:
         return time.tzname[0]
 
 
-RAW_TABLES = ("samples", "screenshots", "transcripts", "events", "agent_events")
+RAW_TABLES = ("samples", "screenshots", "transcripts", "events", "agent_events", "phone_events")
 
 
 def export_hour(con, start: float, end: float) -> dict:
@@ -1692,10 +1833,14 @@ def upload_raw(con, now: float) -> tuple[int, int]:
             a = ds + h * 3600
             if a > now:
                 break
-            if not con.execute("SELECT 1 FROM samples WHERE ts>=? AND ts<? LIMIT 1", (a, a + 3600)).fetchone():
+            if not (con.execute("SELECT 1 FROM samples WHERE ts>=? AND ts<? LIMIT 1", (a, a + 3600)).fetchone()
+                    or con.execute("SELECT 1 FROM phone_events WHERE ts>=? AND ts<? LIMIT 1", (a, a + 3600)).fetchone()):
                 continue
-            if now - a > 26 * 3600 and con.execute("SELECT 1 FROM raw_uploads WHERE day=? AND hour=?", (day, f"{h:02d}")).fetchone():
-                continue  # settled long ago
+            up = con.execute("SELECT uploaded FROM raw_uploads WHERE day=? AND hour=?", (day, f"{h:02d}")).fetchone()
+            late = up and con.execute("SELECT 1 FROM phone_events WHERE ts>=? AND ts<? AND received>? LIMIT 1",
+                                      (a, a + 3600, up[0])).fetchone()
+            if now - a > 26 * 3600 and up and not late:
+                continue  # settled long ago (unless the phone delivered something for it since)
             data = export_hour(con, a, a + 3600)
             blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
             digest = hashlib.sha1(blob).hexdigest()
@@ -1709,7 +1854,8 @@ def upload_raw(con, now: float) -> tuple[int, int]:
                 f.write_bytes(gzip.compress(blob, 6))
                 r2_put(key, f, "application/gzip")
                 b = f.stat().st_size
-            last = max((r[0] for r in data["tables"]["samples"]["rows"]), default=a)
+            last = max([r[0] for r in data["tables"]["samples"]["rows"]]
+                       + [r[2] for r in data["tables"]["phone_events"]["rows"]], default=a)
             regs.append({"day": day, "hour": hour, "key": key, "start": a, "end": a + 3600, "last_ts": last, "bytes": b, "tz": data["tz"]})
             con.execute("INSERT OR REPLACE INTO raw_uploads VALUES(?,?,?,?,?,?)", (day, hour, key, digest, b, time.time()))
             con.commit()
@@ -1717,6 +1863,46 @@ def upload_raw(con, now: float) -> tuple[int, int]:
     for i in range(0, len(regs), 50):
         api("/api/ingest", {"device": CFG["deviceId"], "raw": regs[i:i + 50]})
     return n, size
+
+
+def pull_phone(con) -> tuple[int, int]:
+    """bring the iPhone's events (and its audio chunks, for transcription) from the cloud into the local DB"""
+    import urllib.parse, urllib.request
+    dev = CFG.get("phoneDeviceId")
+    if not dev:
+        return 0, 0
+    # phone audio is already in R2: drop local copies once transcribed
+    for r in con.execute("SELECT path FROM audio_chunks WHERE source='phone' AND transcribed!=0").fetchall():
+        (ROOT / r["path"]).unlink(missing_ok=True)
+    row = con.execute("SELECT last FROM agent_sync WHERE source='phone'").fetchone()
+    seq = int(row[0]) if row else 0
+    n_ev = n_audio = 0
+    while True:
+        res = api(f"/api/phone/since?device={dev}&seq={seq}", method="GET")
+        evs = res.get("events", [])
+        for e in evs:
+            con.execute("INSERT OR IGNORE INTO phone_events(id, seq, ts, kind, data, received) VALUES(?,?,?,?,?,?)",
+                        (e["id"], e["seq"], e["ts"], e["kind"], json.dumps(e.get("data") or {}), e.get("received")))
+            d = e.get("data") or {}
+            if e["kind"] == "audio" and d.get("key") and not d.get("silent"):
+                rel = f"phone/{Path(d['key']).name}"
+                dest = ROOT / rel
+                if not con.execute("SELECT 1 FROM audio_chunks WHERE path=?", (rel,)).fetchone():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    req = urllib.request.Request(CFG["cloudUrl"].rstrip("/") + "/api/raw/" + urllib.parse.quote(d["key"], safe=""),
+                                                 headers={"authorization": f"Bearer {CFG['cloudToken']}", "user-agent": "lifelog-cli"})
+                    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
+                        shutil.copyfileobj(r, f)
+                    con.execute("INSERT INTO audio_chunks(source, ts_start, ts_end, path, peak_db) VALUES('phone',?,?,?,?)",
+                                (d.get("start", e["ts"]), d.get("end", e["ts"] + 300), rel, d.get("peak_db")))
+                    n_audio += 1
+            seq = max(seq, e["seq"])
+            n_ev += 1
+        con.execute("INSERT OR REPLACE INTO agent_sync(source,last) VALUES('phone',?)", (seq,))
+        con.commit()
+        if not res.get("more"):
+            break
+    return n_ev, n_audio
 
 
 def pull_deep(con) -> int:
@@ -1839,6 +2025,12 @@ def sync(con, all_days: bool = False) -> None:
         n, b = upload_media(con, time.time())
         print(f"media: {n} bundle(s), {b / 1e6:.1f} MB uploaded")
         if CFG.get("cloudUrl") and CFG.get("cloudToken"):
+            try:
+                ne, na = pull_phone(con)
+                if ne:
+                    print(f"phone: {ne} event(s), {na} audio chunk(s) pulled")
+            except Exception as e:
+                print(f"phone pull failed: {e}", file=sys.stderr)
             n, b = upload_raw(con, time.time())
             if n:
                 print(f"raw data: {n} hour(s), {b / 1e3:.0f} kB uploaded")

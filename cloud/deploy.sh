@@ -45,15 +45,20 @@ done
 ANALYST=$(cfg analystToken "")
 [ -n "$ANALYST" ] || ANALYST=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 printf '%s' "$ANALYST" | wrangler secret put ANALYST_TOKEN >/dev/null
+# and one for the iPhone app (baked into it at build time): upload-only
+PHONE=$(cfg phoneToken "")
+[ -n "$PHONE" ] || PHONE=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+printf '%s' "$PHONE" | wrangler secret put PHONE_TOKEN >/dev/null
 [ -n "$URL" ] || { echo "$OUT" | tail -15; echo "Deployed, but couldn't find the workers.dev URL above — set cloudUrl in $CONFIG yourself."; }
 
-python3 - "$CONFIG" "$URL" "$TOKEN" "$ANALYST" <<'PY'
+python3 - "$CONFIG" "$URL" "$TOKEN" "$ANALYST" "$PHONE" <<'PY'
 import json, sys
-path, url, token, analyst = sys.argv[1:]
+path, url, token, analyst, phone = sys.argv[1:]
 c = json.load(open(path))
 if url: c["cloudUrl"] = url
 c["cloudToken"] = token
 c["analystToken"] = analyst
+c["phoneToken"] = phone
 json.dump(c, open(path, "w"), indent=2, sort_keys=True)
 PY
 chmod 600 "$CONFIG"

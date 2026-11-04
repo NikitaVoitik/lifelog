@@ -2,7 +2,7 @@
 """ll — the data tool for Lifelog's deep analysis (a Claude coordinator + Sonnet agents, usually in Claude's cloud).
 
 Everything the Mac recorded is in Cloudflare: one raw file per local hour (per-second activity, screen text, transcripts,
-events, coding-agent prompts) plus the screenshots. This tool pulls exactly the slice you ask for and renders it.
+events, coding-agent prompts, and the iPhone's events and speech) plus the screenshots. This tool pulls exactly the slice you ask for and renders it.
 All times are the person's local time (the tool switches to their timezone itself).
 
     ll.py status                              what data exists, what's analyzed, which range to do next
@@ -15,6 +15,7 @@ All times are the person's local time (the tool switches to their timezone itsel
     ll.py shots DAY FROM TO [--every 60]      a lighter batch: one frame per active minute + every window switch
     ll.py transcript DAY FROM TO              everything heard (mic + computer audio), with speakers
     ll.py agents DAY FROM TO [--full]         coding-agent prompts / replies (T3, Claude Code, Codex, Delta) in full
+    ll.py phone DAY FROM TO                   the iPhone: unlocked sessions, sound, calls, motion, steps, places, speech
     ll.py search DAY WORDS                    where WORDS appeared that day (screen, speech, prompts, window titles)
     ll.py timeline DAY                        the current timeline (deep where analyzed, quick elsewhere) + summary
     ll.py sleep [--days 7]                    recent nights' sleep, for judging tonight's
@@ -281,14 +282,46 @@ def cmd_overview(a):
     words = collections.Counter()
     for t in con.execute("SELECT ts_start, text FROM transcripts WHERE ts_start>=? AND ts_start<?", (x, y)):
         words[int((t["ts_start"] - x) // 600)] += len((t["text"] or "").split())
-    print("from   rec  active locked frames keys  scroll  mic-s words  prompts(you/agt/other)  main app · window")
+    # the iPhone: seconds unlocked and steps per 10 minutes
+    phone_use, steps = collections.Counter(), collections.Counter()
+    for ts, txt in ((e[0], e[2]) for e in L.phone_entries(con, x, y)):
+        m = re.match(r"(\d\d:\d\d:\d\d)–(\d\d:\d\d:\d\d)  \[PHONE UNLOCKED", txt)
+        if m:
+            b = at(L.dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d"), m.group(2))
+            b = b + 86400 if b < ts else b
+            t = ts
+            while t < b:
+                i = int((t - x) // 600)
+                nxt = min(b, x + (i + 1) * 600)
+                phone_use[i] += nxt - t
+                rows[i]  # make the row exist even if the laptop was off
+                t = nxt
+        m = re.search(r"\[PHONE STEPS: ([\d,]+) steps", txt)
+        if m:
+            steps[int((ts - x) // 600)] += int(m.group(1).replace(",", ""))
+            rows[int((ts - x) // 600)]
+    print("from   rec  active locked frames keys  scroll  mic-s words  phone-s steps  prompts(you/agt/other)  main app · window")
     for i in range(int((y - x) // 600) + 1):
         r = rows.get(i)
         if not r:
             continue
         top = r["apps"].most_common(1)[0][0] if r["apps"] else "—"
         p = f"{prompts[(i, 'you')]}/{prompts[(i, 'agent')] + prompts[(i, 'scheduled')]}/{prompts[(i, '?')]}"
-        print(f"{hms(x + i * 600)[:5]}  {r['n']:>4} {r['act']:>6} {r['lock']:>6} {frames[i]:>6} {r['keys']:>5} {r['scroll']:>7} {r['mic']:>5} {words[i]:>5}  {p:>13}  {top[:70]}")
+        print(f"{hms(x + i * 600)[:5]}  {r['n']:>4} {r['act']:>6} {r['lock']:>6} {frames[i]:>6} {r['keys']:>5} {r['scroll']:>7} {r['mic']:>5} {words[i]:>5}  {int(phone_use[i]):>7} {steps[i]:>5}  {p:>13}  {top[:70]}")
+
+
+def cmd_phone(a):
+    x, y = span(a.day, a.frm, a.to)
+    con = db_for(x, y)
+    lines = sorted(L.phone_entries(con, x, y))
+    tr = con.execute("SELECT t.ts_start, t.ts_end, t.text, v.name, t.speaker_id FROM transcripts t LEFT JOIN voices v ON v.id=t.speaker_id "
+                     "WHERE t.source='phone' AND t.ts_start>=? AND t.ts_start<? ORDER BY t.ts_start", (x, y)).fetchall()
+    lines += [(t["ts_start"], 3, f"    [PHONE MIC · {L.voice_label(t['name'], t['speaker_id']) or '?'} {hms(t['ts_start'])}–{hms(t['ts_end'])}] “{t['text']}”")
+              for t in tr]
+    if not lines:
+        print("(nothing from the phone in this range)")
+    for _, _, text in sorted(lines, key=lambda e: (e[0], e[1])):
+        print(text)
 
 
 def cmd_log(a):
@@ -624,7 +657,7 @@ def main():
     sub.add_parser("status")
     p = sub.add_parser("guide"); p.add_argument("topic", nargs="?", choices=["log", "absences", "summary"], default="log")
     p = sub.add_parser("overview"); p.add_argument("day"); p.add_argument("frm", nargs="?"); p.add_argument("to", nargs="?")
-    for name in ("log", "ocr", "transcript", "agents"):
+    for name in ("log", "ocr", "transcript", "agents", "phone"):
         p = sub.add_parser(name); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
         if name in ("log", "agents"):
             p.add_argument("--full", action="store_true")

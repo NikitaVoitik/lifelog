@@ -55,6 +55,22 @@ The laptop keeps making a quick timeline every 30 min: one `claude -p` call per 
 
 Each run takes the first stretch of the last 30 h that no deep run covers, up to 14 h at a time. The routine's environment needs `LIFELOG_URL` and `LIFELOG_TOKEN` (the analyst token) and network access to the Worker.
 
+## iPhone
+
+`phone/` is a small iPhone app that covers the time away from the laptop. It records plain facts and uploads them straight to the Worker, so the laptop doesn't need to be on:
+
+- **Mic, always on** (the orange dot stays on). It records 5-minute AAC chunks at 16 kHz mono, the same as the Mac. Music keeps playing, and AirPods stay in high-quality mode, because the phone always uses its built-in mic. A minute-by-minute loudness record also notes whether another app is playing audio. Chunks with nothing above -50 dB aren't uploaded. Audio waits for Wi-Fi unless you allow cellular.
+- **Screen:** on and off, locked and unlocked, which gives phone-use sessions and glances. It can't see which app you used.
+- **Calls:** start, connect and end, with no numbers. **Motion** (walking, vehicle, still) and **steps** per 5 minutes come from the motion coprocessor.
+- **Places:** arrivals, departures and moves of about 500 m, named with Apple's reverse geocoder. There's no continuous GPS.
+- **Battery** (charging or unplugged), **audio output** (speaker, AirPods), and recorder gaps.
+
+The phone uses its own `PHONE_TOKEN`, which `cloud/deploy.sh` creates as `phoneToken` in config and the build compiles in. It can only upload: `PUT /api/upload/iphone/…` and `POST /api/phone/events`. On the Mac, `lifelog sync` pulls new events (`/api/phone/since`) into `phone_events`, downloads non-silent audio for the normal transcription (source `phone`, so your voice is still "Me"), and includes everything in the raw hours. The log then has `[PHONE …]` lines, `ll.py phone` shows the phone alone, and the overview gains `phone-s` / `steps` columns. The timeline has an **on phone** category.
+
+Build and install: `phone/build.sh`. It needs Xcode, a paired iPhone in developer mode, and `LIFELOG_TEAM` (or `phoneTeam` in config) set to your Apple team id. `phone/build.sh --sim` only compiles.
+
+iOS can't start recording from the background. If the app is killed (force-quit, reboot, or iOS reclaiming memory), a location wake-up brings it back for everything except the mic, and it sends a "Lifelog stopped listening" notification.
+
 ## Speech: who said what
 
 `lifelog-asr` (in `asr/`, built on [FluidAudio](https://github.com/FluidInference/FluidAudio)) runs everything on-device with Core ML:
@@ -148,6 +164,8 @@ pipeline/lifelog.py      CLI: transcription, voices, Claude timeline + summary, 
 pipeline/agentlogs.py    T3 Code / Claude Code / Codex reader (runs locally and on ssh hosts)
 analysis/ll.py           data tool for the deep cloud analysis; COORDINATOR.md / CHUNK.md are its playbooks
 pipeline/report.html     report / viewer (local file or served by the Worker)
+phone/                   iPhone app (SwiftUI): project.yml (xcodegen), Sources/{App,Mic,Sensors,Uploader,Store}.swift, build.sh
+tools/make-phone-icon.swift  draws the iPhone icon
 cloud/                   Worker (src/index.js), D1 schema, wrangler.toml, deploy.sh
 build.sh / install.sh / uninstall.sh
 ```

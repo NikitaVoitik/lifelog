@@ -18,6 +18,9 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
    - If text in a frame is too small to read, `ll.py shot DAY HH:MM:SS` gives that moment at full resolution.
    - `ll.py ocr DAY HH:MM HH:MM [--grep WORD]` gives the full screen text of a short span (the log only shows what changed).
    - `ll.py transcript DAY HH:MM HH:MM` gives everything said. "Me" is the person; others are named voices or "voice #N".
+   - `ll.py phone DAY HH:MM HH:MM` gives the iPhone's record alone ("[PHONE …]" lines are also in the log): when the phone
+     was unlocked, calls, walking, places, and speech heard by the phone's mic. Phone use during laptop work is a
+     distraction worth its own segment ("on phone") when it lasts ~20 s or more and the laptop sat untouched meanwhile.
    - `ll.py agents DAY HH:MM HH:MM --full` gives complete prompts and replies. **PROMPT FROM THE USER is certain** (they typed or
      dictated it, or sent it from their phone). Prompts from other agents or schedules are background work, never the person's time.
 5. Write the segments file to OUTPUT (format below), then run `ll.py check OUTPUT` and fix it until it says ok.

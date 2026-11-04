@@ -30,3 +30,9 @@ CREATE TABLE IF NOT EXISTS deep_segments(
   device TEXT, ts_start REAL, ts_end REAL, category TEXT, activity TEXT, detail TEXT, app TEXT, run_id INTEGER,
   PRIMARY KEY(device, ts_start));
 CREATE TABLE IF NOT EXISTS deep_summaries(device TEXT, day TEXT, text TEXT, updated REAL, PRIMARY KEY(device, day));
+-- The iPhone app's events (screen on/off/lock, calls, motion, places, battery, audio levels, recorded audio chunks).
+-- seq is the server's order, so the Mac can pull "everything after N" even when the phone uploads late.
+CREATE TABLE IF NOT EXISTS phone_events(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT, id TEXT, ts REAL, kind TEXT, data TEXT, received REAL,
+  UNIQUE(device, id));
+CREATE INDEX IF NOT EXISTS phone_events_ts ON phone_events(device, ts);

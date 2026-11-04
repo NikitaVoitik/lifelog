@@ -1,0 +1,41 @@
+# Lifelog for iPhone. Generate the Xcode project with `xcodegen` (phone/build.sh does it for you).
+name: LifelogPhone
+options:
+  bundleIdPrefix: lifelog.example
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ${LIFELOG_TEAM}
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  Lifelog:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: lifelog.example.phone
+        PRODUCT_NAME: Lifelog
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Lifelog
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Lifelog records what's said around you so Claude can reconstruct your day."
+        INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription: "Lifelog notes the places you arrive at and leave, so your timeline knows when you were out."
+        INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "Lifelog notes the places you arrive at and leave, so your timeline knows when you were out."
+        INFOPLIST_KEY_NSMotionUsageDescription: "Lifelog notes when you walk, drive or stay still, so your timeline knows when you were moving."
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: Sources/Info.plist
+      properties:
+        UIBackgroundModes: [audio, location, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [lifelog.example.phone.refresh]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false

@@ -5,3 +5,7 @@ __pycache__/
 .DS_Store
 cloud/node_modules/
 cloud/.wrangler/
+phone/Sources/Secrets.swift
+phone/LifelogPhone.xcodeproj/
+phone/build/
+phone/Sources/Info.plist

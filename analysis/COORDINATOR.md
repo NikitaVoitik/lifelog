@@ -15,14 +15,15 @@ say so in your final message. Never print the token.
    cut off by the end of the data) up to the newest recorded second. If there are less than 20 minutes of new data,
    say so and stop. If the range is more than 14 h, do its first 14 h; the next run continues from there.
 2. **Survey.** Run `ll.py overview DAY FROM TO` for the range (once per day if it crosses midnight). Also run `ll.py sleep`
-   and `ll.py timeline DAY` for the day so far, to see what came before.
+   and `ll.py timeline DAY` for the day so far, to see what came before. The overview's `phone-s` and `steps` columns come
+   from the person's iPhone (seconds unlocked, steps walked); rows can exist with the laptop off.
 3. **Plan chunks.** Split the range into contiguous chunks that cover it exactly. Put boundaries at natural breaks: long
    idle, screen locked, or an app or topic change.
    - Active stretches: size each chunk by the `frames` column of the overview (screenshots taken while active). An agent
      reads every one of them, so give each **at most ~150 frames**. On a busy screen that's 5–10 minutes; on a calm one
      it's much longer.
-   - Stretches with no laptop input (locked, idle, no data): one chunk each. Don't spend an agent on them unless the overview
-     shows speech or prompts from the user inside them.
+   - Stretches with no laptop input (locked, idle, no data): one chunk each, done by you (step 5). Don't spend an agent on
+     them unless the overview shows a lot of speech or prompts from the user inside them.
    - Aim for at most ~30 agents per run, and launch them in waves of ~10 if needed. If the range needs more, shorten the
      range: do the first part completely and leave the rest for the next run.
 4. **Run the swarm.** Launch one agent per active chunk, all at once, in parallel (Agent tool, `model: "sonnet"`). Each
@@ -31,8 +32,12 @@ say so in your final message. Never print the token.
    - 2–4 lines of context: what the person was doing just before the chunk, names of projects or people seen so far, and
      anything special (e.g. "they're on a call that started at 13:10").
 5. **Absences (you decide).** Read `ll.py guide absences`: those are the rules. Then decide each no-input stretch from the
-   evidence. Look at the time of day, lock/unlock events, speech, prompts the user sent (from the phone means awake),
-   what came before and after, and recent sleep history. One "sleep" segment per night, with the bed time and wake time
+   evidence. Run `ll.py phone DAY FROM TO` for each one: the iPhone shows when they used the phone (unlocked sessions),
+   walked, left or arrived at places, took calls, charged it at night, and what was said around it. Also look at the time of
+   day, lock/unlock events, speech, prompts the user sent (from the phone means awake), what came before and after, and
+   recent sleep history. Split the stretch where the phone shows the activity changed: e.g. "on phone" for unlocked sessions
+   of a minute or more (merge sessions a few minutes apart), "away" while walking or out (name the place if the phone did),
+   "voice & calls" for a phone call. One "sleep" segment per night, with the bed time and wake time
    you judge most likely. Daytime absences are usually "away"; use "idle at desk" if they were present but not touching
    anything. Write these as segments in `/tmp/deep/absences.json` (same format as the chunks). If an agent's reply says
    part of its chunk looks like sleep or being out, decide that too.
@@ -46,11 +51,12 @@ say so in your final message. Never print the token.
    it as the day so far.
 8. **Save.** Run `ll.py write /tmp/deep/all.json`, with a one-line `"note"` in the file (e.g. "4 agents, 13:00–18:30, 212 segments").
 9. **Final message.** State the range, number of segments and agents, the sleep or absence calls you made and why, and
-   anything that looked broken in the data (gaps, a dead mic, missing screenshots).
+   anything that looked broken in the data (gaps, a dead mic, missing screenshots, the phone not reporting).
 
 ## Ground rules
 
-- Facts beat guesses: a prompt from the user, their voice ("Me"), an unlock, or keystrokes prove they were there.
+- Facts beat guesses: a prompt from the user, their voice ("Me"), an unlock, or keystrokes prove they were there. Unlocking
+  the iPhone proves they were awake (not where); steps, motion and places show they were out.
   Agent-to-agent prompts and coding agents finishing prove nothing about the person.
 - Don't invent names, topics or reasons. If it's unclear, say what the evidence suggests.
 - Everything here is private: don't send the data anywhere except back through `ll.py write`.
