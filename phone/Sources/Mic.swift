@@ -230,6 +230,7 @@ final class Mic: @unchecked Sendable {
             }
             minute = m; minSum = 0; minN = 0; minPeak = -160; loudBlocks = 0; blocks = 0
         }
+        if rmsDb <= -150 { return }  // digital silence while the input starts up isn't a measurement
         minSum += Double(rmsDb); minN += 1
         minPeak = max(minPeak, peakDb)
         blocks += 1

@@ -15,7 +15,8 @@ struct LifelogPhoneApp: App {
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ app: UIApplication, didFinishLaunchingWithOptions opts: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        let why = opts?[.location] != nil ? "location wake" : app.applicationState == .background ? "background launch" : "opened"
+        // (with scenes, every launch starts in .background, so that can't tell an open from a wake-up)
+        let why = opts?[.location] != nil ? "location wake" : "launched"
         Store.shared.log("app", ["state": "launch", "reason": why])
         BGTaskScheduler.shared.register(forTaskWithIdentifier: AppState.refreshID, using: nil) { task in
             AppState.shared.refresh(task as! BGAppRefreshTask)
