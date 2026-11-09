@@ -4,7 +4,6 @@
 # and deploys the Cloudflare side (cloud/deploy.sh).
 set -euo pipefail
 cd "$(dirname "$0")"
-SRC="$(pwd)"
 DATA="${LIFELOG_DIR:-$HOME/Lifelog}"
 APPDIR="$HOME/Applications"
 AGENTS="$HOME/Library/LaunchAgents"

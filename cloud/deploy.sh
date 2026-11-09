@@ -38,7 +38,7 @@ TOKEN=$(cfg cloudToken "")
 OUT=$(wrangler deploy 2>&1) || { echo "$OUT"; exit 1; }
 URL=$(echo "$OUT" | grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' | head -1)
 # set the API token and make sure the live Worker actually accepts it (secret propagation can lag a deploy)
-for attempt in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   printf '%s' "$TOKEN" | wrangler secret put API_TOKEN >/dev/null
   [ -z "$URL" ] && break
   sleep 5
