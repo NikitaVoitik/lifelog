@@ -1,0 +1,22 @@
+# Lifelog cloud: R2 (media) + D1 (timeline) + a Worker API that the laptop, the web viewer and the phone app talk to.
+#
+# This is the template. cloud/deploy.sh copies it to wrangler.toml (gitignored, because it holds your D1 database id)
+# and fills in database_id and bucket_name for your Cloudflare account. Edit wrangler.toml, not this file, for local tweaks.
+name = "lifelog"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "lifelog-media"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lifelog"
+database_id = "00000000-0000-0000-0000-000000000000"  # filled in by deploy.sh

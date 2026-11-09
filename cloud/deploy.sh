@@ -12,7 +12,12 @@ cfg() { python3 -c "import json,sys; print(json.load(open('$CONFIG')).get('$1') 
 BUCKET=$(cfg r2Bucket lifelog-media)
 DBNAME=lifelog
 
-wrangler whoami >/dev/null 2>&1 || { echo "Not logged in — run: wrangler login"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 not found (install Xcode command line tools: xcode-select --install)" >&2; exit 1; }
+command -v wrangler >/dev/null || { echo "wrangler not found — install it with: npm i -g wrangler  (needs Node.js: brew install node)" >&2; exit 1; }
+wrangler whoami >/dev/null 2>&1 || { echo "Not logged in to Cloudflare — run: wrangler login" >&2; exit 1; }
+
+# wrangler.toml is per-account (it holds your D1 database id), so it's gitignored and made from the template
+[ -f wrangler.toml ] || /bin/cp wrangler.example.toml wrangler.toml
 
 echo "→ R2 bucket $BUCKET"
 wrangler r2 bucket list 2>/dev/null | grep -qE "^name: +$BUCKET\$" || wrangler r2 bucket create "$BUCKET"
