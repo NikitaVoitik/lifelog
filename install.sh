@@ -10,8 +10,17 @@ APPDIR="$HOME/Applications"
 AGENTS="$HOME/Library/LaunchAgents"
 UIDN=$(id -u)
 
+need() { command -v "$1" >/dev/null || { echo "✗ $1 not found — $2" >&2; exit 1; }; }
+[ "$(uname -s)" = Darwin ] || { echo "✗ Lifelog's recorder is a macOS app; run this on a Mac" >&2; exit 1; }
+[ "$(sw_vers -productVersion | cut -d. -f1)" -ge 14 ] || { echo "✗ macOS 14 (Sonoma) or newer is required" >&2; exit 1; }
+need swiftc "install Xcode or the command line tools: xcode-select --install"
+need swift "install Xcode or the command line tools: xcode-select --install"
+need python3 "install the command line tools: xcode-select --install"
+need brew "install Homebrew from https://brew.sh"
+
 echo "→ dependencies"
 for f in ffmpeg whisper-cpp; do brew list "$f" >/dev/null 2>&1 || brew install "$f"; done
+command -v wrangler >/dev/null || echo "  ! wrangler not found — cloud sync is off until you: brew install node && npm i -g wrangler"
 command -v claude >/dev/null || echo "  ! claude CLI not found — AI analysis will be skipped until you install Claude Code"
 
 echo "→ models"

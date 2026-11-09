@@ -33,10 +33,10 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
 - Split whenever the activity really changes. Examples: typing a prompt (which thread, what it asked), waiting while the agent
   works, reading its reply, switching to X and scrolling, talking to someone, watching a video. Segments can be as short
   as ~5–10 s when something distinct happened. Don't split on noise like a 2-second app flick.
-- **activity**: ≤ 90 chars, concrete. Name the thing: "Typing prompt in T3 'Why Blort Auth Cookies Changed': asks why
-  the proxy was needed", "Scrolling X home feed", "Reading Codex reply on usage QA".
+- **activity**: ≤ 90 chars, concrete. Name the thing: "Typing prompt in T3 'Fix login redirect': asks why the
+  session cookie is dropped", "Scrolling X home feed", "Reading Codex reply on usage QA".
 - **detail**: 1–2 sentences of evidence: what was typed, read, said or watched. Prefer what the screenshots showed
-  (e.g. "screenshot 14:02:10: X thread about Sora pricing"). Don't invent. If unsure, say what the evidence suggests.
+  (e.g. "screenshot 14:02:10: X thread about GPU pricing"). Don't invent. If unsure, say what the evidence suggests.
 - **category**: one from `ll.py guide`. Long no-input stretches get "away" (or "idle at desk" if they're clearly present:
   reading, watching, talking). Leave sleep decisions to the coordinator unless the chunk is entirely an obvious night.
 - **app**: the main app or site ("T3 Code", "x.com", "Zed", "Telegram").

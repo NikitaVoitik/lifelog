@@ -7,6 +7,7 @@
 # and every change silently voids the grants. Override with LIFELOG_SIGN_IDENTITY=<sha1 or name> if you must.
 set -euo pipefail
 cd "$(dirname "$0")"
+command -v swiftc >/dev/null || { echo "swiftc not found — install Xcode or the command line tools: xcode-select --install" >&2; exit 1; }
 APP=build/Lifelog.app
 IDENTITY="${LIFELOG_SIGN_IDENTITY:-$(tools/signing-cert.sh)}"
 rm -rf "$APP"
