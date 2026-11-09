@@ -1,7 +1,7 @@
 # Lifelog for iPhone. Generate the Xcode project with `xcodegen` (phone/build.sh does it for you).
+# phone/build.sh sets LIFELOG_TEAM (your Apple team id) and LIFELOG_BUNDLE_ID before running xcodegen.
 name: LifelogPhone
 options:
-  bundleIdPrefix: lifelog.example
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
@@ -21,7 +21,7 @@ targets:
     sources: [Sources]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: lifelog.example.phone
+        PRODUCT_BUNDLE_IDENTIFIER: ${LIFELOG_BUNDLE_ID}
         PRODUCT_NAME: Lifelog
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Lifelog
@@ -36,6 +36,6 @@ targets:
       path: Sources/Info.plist
       properties:
         UIBackgroundModes: [audio, location, fetch]
-        BGTaskSchedulerPermittedIdentifiers: [lifelog.example.phone.refresh]
+        BGTaskSchedulerPermittedIdentifiers: ["${LIFELOG_BUNDLE_ID}.refresh"]
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

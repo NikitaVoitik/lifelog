@@ -47,7 +47,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
 final class AppState: @unchecked Sendable {
     static let shared = AppState()
-    static let refreshID = "lifelog.example.phone.refresh"
+    // must match BGTaskSchedulerPermittedIdentifiers in project.yml (<bundle id>.refresh)
+    static let refreshID = (Bundle.main.bundleIdentifier ?? "lifelog.phone") + ".refresh"
 
     func ensureRunning(reason: String) {
         DispatchQueue.main.async {
