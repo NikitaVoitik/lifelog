@@ -176,6 +176,9 @@ def migrate(con: sqlite3.Connection) -> None:
     cols = {r[1] for r in con.execute("PRAGMA table_info(transcripts)")}
     if "speaker_id" not in cols:
         con.execute("ALTER TABLE transcripts ADD COLUMN speaker_id INTEGER")
+    cols = {r[1] for r in con.execute("PRAGMA table_info(samples)")}
+    if "synth" not in cols:  # input events another process injected (agents driving the cursor); not the user
+        con.execute("ALTER TABLE samples ADD COLUMN synth INTEGER")
     cols = {r[1] for r in con.execute("PRAGMA table_info(agent_events)")}
     for c in ("sender", "via", "from_thread"):  # T3 knows who sent each prompt: "you" / "agent" / "scheduled"
         if c not in cols:
@@ -725,9 +728,10 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
         a, b, sig = run["a"], run["b"] + BUCKET, run["sig"]
         n = (b - a) // BUCKET
         span = f"{hms(a)}–{hms(b)}" if n > 1 else hms(a)
+        robot = f"  AUTOMATED INPUT {run['synth']} (injected by software, not the user)" if run["synth"] else ""
         if sig[0] == "quiet":
             what = "SCREEN LOCKED, " if sig[1] else ""
-            text = f"{span}  {what}no keyboard/mouse input (system idle up to {int(run['idle'])}s), audio quiet"
+            text = f"{span}  {what}no keyboard/mouse input (idle up to {int(run['idle'])}s), audio quiet{robot}"
         else:
             parts = [span]
             if run["locked"]:
@@ -746,7 +750,7 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
                 parts.append(f"computer-audio up to {run['sys']:.0f}dB")
             if not (run["keys"] or run["clicks"] or run["scroll"]) and run["idle"] > 15:
                 parts.append(f"no typing/clicking (idle up to {int(run['idle'])}s)")
-            text = "  ".join(parts)
+            text = "  ".join(parts) + robot
         entries.append((a, 1, text))
         run = None
 
@@ -762,7 +766,8 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
         clicks = sum(s["clicks"] or 0 for s in ss)
         scroll = sum(s["scroll"] or 0 for s in ss)
         mouse = sum(s["mouse"] or 0 for s in ss)
-        mics = [s["mic_db"] for s in ss if s["mic_db"] is not None]
+        synth = sum((s["synth"] or 0) if "synth" in s.keys() else 0 for s in ss)
+        mics =[s["mic_db"] for s in ss if s["mic_db"] is not None]
         syss = [s["sys_db"] for s in ss if s["sys_db"] is not None]
         mic = max(mics) if mics else None
         sysd = max(syss) if syss else None
@@ -785,15 +790,16 @@ def build_log(con: sqlite3.Connection, start: float, end: float, max_chars: int 
 
         quiet = keys == 0 and clicks == 0 and scroll == 0 and mouse < 40 and not mic_loud and not sys_loud
         # typing bursts stay at 10-s resolution for up to 1 minute per line so pauses remain visible
-        sig = ("quiet", locked) if quiet else (keys > 0, clicks > 0, scroll > 0, mouse >= 40, mic_loud, sys_loud, locked)
+        sig = (("quiet", locked) if quiet else (keys > 0, clicks > 0, scroll > 0, mouse >= 40, mic_loud, sys_loud, locked)) + (synth > 0,)
         max_len = 6 * 60 if quiet or not keys else 60
         if run and run["sig"] == sig and bts - run["b"] == BUCKET and bts - run["a"] < max_len:
             run["b"] = bts
         else:
             flush()
-            run = {"a": bts, "b": bts, "sig": sig, "keys": 0, "clicks": 0, "scroll": 0, "mouse": 0,
+            run = {"a": bts, "b": bts, "sig": sig, "keys": 0, "clicks": 0, "scroll": 0, "mouse": 0, "synth": 0,
                    "mic": None, "sys": None, "idle": 0, "locked": locked}
         run["keys"] += keys
+        run["synth"] += synth
         run["clicks"] += clicks
         run["scroll"] += scroll
         run["mouse"] += mouse
@@ -994,6 +1000,9 @@ The log is time-ordered (local time, HH:MM:SS). Line types:
 - "HH:MM:SS keys N clicks N scroll Npx mouse Npx MIC -NNdB computer-audio -NNdB" : one 10-second bucket of input activity.
   keys = keystrokes (typing), scroll = scrolling distance (reading/feeds), MIC level near/above -40dB = someone talking near the laptop,
   computer-audio = sound playing from the computer (video, music, the other side of a call).
+- "AUTOMATED INPUT N" on an input line: N clicks/keys/scrolls that software injected (a coding agent driving the cursor in a UI
+  test, an automation tool). They are NOT the user and are already excluded from keys/clicks/mouse and from idle. Long stretches of
+  automated input with no real input mean an agent was working the machine on its own — the user may be asleep or away.
 - "A–B no keyboard/mouse input" : nothing touched, audio quiet. Short gaps (≤2 min) inside work usually mean reading or thinking;
   long gaps usually mean away from the laptop — use context (screen locked, what was on screen, what came after) to decide.
 - "[new on screen …]" / "[screen text (new view) …]" : OCR of the screen. Use it to see WHAT was being read, written or watched
@@ -1634,7 +1643,26 @@ def r2_target() -> list[str]:
     return ["--local", "--persist-to", CFG["wranglerLocal"]] if CFG.get("wranglerLocal") else ["--remote"]
 
 
+R2_HTTP_MAX = 95_000_000  # Workers accept request bodies up to 100 MB; bigger files go through wrangler
+
+
 def r2_put(key: str, path: Path, ctype: str) -> None:
+    """through the Worker's PUT /api/object (one HTTPS request, no Node process per file); wrangler for big files,
+    local test mode, or if the Worker refuses"""
+    size = path.stat().st_size
+    if CFG.get("cloudUrl") and not CFG.get("wranglerLocal") and size <= R2_HTTP_MAX:
+        import urllib.parse, urllib.request
+        try:
+            with open(path, "rb") as f:
+                req = urllib.request.Request(CFG["cloudUrl"].rstrip("/") + "/api/object/" + urllib.parse.quote(key), data=f,
+                                             method="PUT", headers={"authorization": f"Bearer {CFG['cloudToken']}",
+                                                                    "content-type": ctype, "content-length": str(size),
+                                                                    "user-agent": "lifelog-cli"})
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    if json.loads(r.read()).get("size") == size:
+                        return
+        except Exception as e:  # e.g. an older Worker without /api/object: fall back
+            print(f"  (direct upload of {key} failed: {e}; using wrangler)")
     p = wrangler(["r2", "object", "put", f"{CFG['r2Bucket']}/{key}", "--file", str(path), "--content-type", ctype, *r2_target()])
     if p.returncode != 0:
         raise RuntimeError(f"wrangler put {key} failed: {(p.stderr or p.stdout).strip()[-400:]}")
@@ -1816,7 +1844,11 @@ def export_hour(con, start: float, end: float) -> dict:
     threads.discard(None)
     cur = con.execute(f"SELECT * FROM t3_threads WHERE id IN ({','.join('?' * len(threads))})", tuple(threads)) if threads else None
     tables["t3_threads"] = {"cols": [c[0] for c in cur.description] if cur else [], "rows": [list(r) for r in cur.fetchall()] if cur else []}
-    tables["voices"] = {"cols": ["id", "name"], "rows": [list(r) for r in con.execute("SELECT id, name FROM voices")]}
+    # only the voices heard this hour: with the whole table, every new voice changed every hour and re-uploaded days of data
+    tr = tables["transcripts"]; vi = tr["cols"].index("speaker_id")
+    vids = sorted({r[vi] for r in tr["rows"] if r[vi] is not None})
+    tables["voices"] = {"cols": ["id", "name"], "rows": [list(r) for r in con.execute(
+        f"SELECT id, name FROM voices WHERE id IN ({','.join('?' * len(vids))}) ORDER BY id", vids)]} if vids else {"cols": ["id", "name"], "rows": []}
     return {"v": 1, "device": CFG["deviceId"], "tz": local_tz(), "start": start, "end": end, "tables": tables}
 
 

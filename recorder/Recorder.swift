@@ -1,6 +1,7 @@
 // Lifelog recorder — records *everything* raw so an LLM can reconstruct where your time went later.
 //
-//  every 1s   : frontmost app, window title, browser URL, idle time, key/click/scroll/mouse counts,
+//  every 1s   : frontmost app, window title, browser URL, idle time, key/click/scroll/mouse counts (hardware
+//               only; events other apps inject are counted separately as `synth`),
 //               mic level, system-audio level, screen-locked flag            -> samples table
 //  up to 1 fps: screenshot of the display under the mouse (only when it changed) + Apple Vision OCR every 10 s
 //                                                                             -> media/<day>/screens, screenshots table
@@ -128,6 +129,9 @@ final class DB {
         }
         sqlite3_busy_timeout(db, 10_000)
         exec(schemaSQL)
+        // newer columns (the pipeline adds them too)
+        let cols = Set(query("PRAGMA table_info(samples)").compactMap { $0.count > 1 ? $0[1] as? String : nil })
+        if !cols.isEmpty && !cols.contains("synth") { exec("ALTER TABLE samples ADD COLUMN synth INTEGER") }
     }
 
     func exec(_ sql: String) {
@@ -213,19 +217,31 @@ final class DB {
 }
 
 // MARK: - Input activity (counts only — never which keys)
+//
+// Only events that came from real hardware count as "you". Anything another process injected with
+// CGEvent.post (coding agents driving the cursor in UI tests, Tuck moving icons, automation tools) carries
+// that process's PID in eventSourceUnixProcessID; hardware events carry 0. Injected events go into `synth`
+// instead, and they don't reset the idle clock — otherwise an overnight agent test run looks like you
+// clicking at the laptop for hours.
 
 final class InputMonitor {
     private let lock = NSLock()
-    private var keys = 0, clicks = 0
+    private var keys = 0, clicks = 0, synth = 0
     private var scroll: Double = 0, mouse: Double = 0
     private var lastMouse: CGPoint?
     private var tap: CFMachPort?
+    private var startedAt = ProcessInfo.processInfo.systemUptime
+    private var lastHuman: TimeInterval?   // systemUptime of the last hardware event the tap saw
+    private var lastSynth: TimeInterval?   // … and of the last injected one
     var active: Bool { tap != nil }
 
     func start() -> Bool {
         if tap != nil { return true }
-        let types: [CGEventType] = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
-                                    .scrollWheel, .mouseMoved, .leftMouseDragged, .rightMouseDragged]
+        startedAt = ProcessInfo.processInfo.systemUptime
+        // counted types + ones only used to know when you last touched anything (key-ups, modifiers, button-ups)
+        let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                                    .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel, .mouseMoved,
+                                    .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let t = CGEvent.tapCreate(
@@ -246,11 +262,25 @@ final class InputMonitor {
 
     private func handle(_ type: CGEventType, _ e: CGEvent) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // "user input" here usually means macOS pulled Input Monitoring (e.g. after a rebuild changed the binary)
+            log("input tap: disabled by \(type == .tapDisabledByTimeout ? "timeout" : "the system (check Input Monitoring)"), re-enabling")
             if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
             return
         }
         lock.lock(); defer { lock.unlock() }
+        let now = ProcessInfo.processInfo.systemUptime
+        if e.getIntegerValueField(.eventSourceUnixProcessID) != 0 {
+            lastSynth = now
+            switch type {
+            case .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel: synth += 1
+            default: break
+            }
+            return
+        }
+        lastHuman = now
         switch type {
+        case .keyUp, .flagsChanged, .leftMouseUp, .rightMouseUp, .otherMouseUp:
+            break
         case .keyDown:
             if e.getIntegerValueField(.keyboardEventAutorepeat) == 0 { keys += 1 }
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -266,11 +296,26 @@ final class InputMonitor {
         }
     }
 
-    func drain() -> (keys: Int, clicks: Int, scroll: Int, mouse: Int) {
+    func drain() -> (keys: Int, clicks: Int, scroll: Int, mouse: Int, synth: Int) {
         lock.lock(); defer { lock.unlock() }
-        let r = (keys, clicks, Int(scroll), Int(mouse))
-        keys = 0; clicks = 0; scroll = 0; mouse = 0
+        let r = (keys, clicks, Int(scroll), Int(mouse), synth)
+        keys = 0; clicks = 0; scroll = 0; mouse = 0; synth = 0
         return r
+    }
+
+    /// Seconds since *you* last touched the keyboard/mouse. The system HID idle clock is reset by injected
+    /// events too, so when the most recent event was injected and nothing else happened after it, count from
+    /// your last hardware event instead. Anything the tap can't see (trackpad gestures, other HID devices)
+    /// still resets the system clock, and then that clock wins.
+    func idleSeconds() -> Double {
+        let hid = systemIdleSeconds()
+        guard tap != nil else { return hid }
+        lock.lock(); defer { lock.unlock() }
+        guard let s = lastSynth, s > (lastHuman ?? -.infinity) else { return hid }
+        let now = ProcessInfo.processInfo.systemUptime
+        // the system's last event is no newer than the last injected one → it was the injected one
+        guard hid >= now - s - 1.0 else { return hid }
+        return max(hid, now - (lastHuman ?? startedAt))
     }
 }
 
@@ -404,7 +449,8 @@ func screenLocked() -> Bool {
     return (d["CGSSessionScreenIsLocked"] as? Bool) ?? ((d["CGSSessionScreenIsLocked"] as? Int) == 1)
 }
 
-func idleSeconds() -> Double {
+/// System-wide HID idle — includes events other processes injected; prefer InputMonitor.idleSeconds()
+func systemIdleSeconds() -> Double {
     CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
 }
 
@@ -431,6 +477,15 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private var lastThumb: [UInt8]?
     private var lastOCRAt: Double = 0
     private var ocrBusy = false
+    private var ocrStartedAt: Double = 0
+    private var ocrReq: VNRecognizeTextRequest?
+    private var ocrFails = 0, ocrFailLoggedAt: Double = 0
+    /// Explicit languages, not automaticallyDetectsLanguage: auto-detection loads an extra model that took 40–95 s per
+    /// frame (and inside the recorder failed every time with an e5rt error), which silently stopped OCR from Nov 3 to Nov 4.
+    static let ocrLanguages: [String] = {
+        let supported = Set((try? VNRecognizeTextRequest().supportedRecognitionLanguages()) ?? [])
+        return ["en-US", "ru-RU"].filter { supported.isEmpty || supported.contains($0) }
+    }()
     private(set) var savedSession = 0
     private(set) var lastError: String?
 
@@ -567,6 +622,10 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
                             [ts, relPath(url), ctx.app, ctx.bundle, ctx.title, ctx.url, img.width, img.height])
             savedSession += 1
             lastError = nil
+            if ocrBusy && ts - ocrStartedAt > 60 {  // a hung Vision call would otherwise stop OCR for good
+                log("ocr: stuck for \(Int(ts - ocrStartedAt)) s, cancelling")
+                ocrReq?.cancel(); ocrStartedAt = ts
+            }
             if cfg.ocr && !ocrBusy && (force || ts - lastOCRAt >= cfg.ocrInterval) {
                 lastOCRAt = ts
                 ocr(img, id: id)
@@ -595,13 +654,13 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// OCR only every `ocrInterval` seconds (and on every app/tab switch) — frames in between are kept as images only.
     private func ocr(_ img: CGImage, id: Int64) {
-        ocrBusy = true
+        let req = VNRecognizeTextRequest()
+        req.recognitionLevel = .accurate
+        req.usesLanguageCorrection = true
+        req.recognitionLanguages = Self.ocrLanguages
+        ocrBusy = true; ocrStartedAt = Date().timeIntervalSince1970; ocrReq = req
         ocrQueue.async {
-            defer { self.frameQueue.async { self.ocrBusy = false } }
-            let req = VNRecognizeTextRequest()
-            req.recognitionLevel = .accurate
-            req.usesLanguageCorrection = true
-            req.automaticallyDetectsLanguage = true
+            defer { self.frameQueue.async { self.ocrBusy = false; self.ocrReq = nil } }
             do {
                 try VNImageRequestHandler(cgImage: img).perform([req])
                 let obs = (req.results ?? []).sorted {
@@ -612,8 +671,16 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
                 let text = obs.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
                 self.db.run("UPDATE screenshots SET ocr=? WHERE id=?", [text, id])
                 self.db.run("INSERT INTO ocr_fts(rowid, text) VALUES(?,?)", [id, text])
+                self.frameQueue.async { self.ocrFails = 0 }
             } catch {
-                log("ocr failed: \(error)")
+                let now = Date().timeIntervalSince1970
+                self.frameQueue.async {  // one line per 10 min while it keeps failing, not one per frame
+                    self.ocrFails += 1
+                    if self.ocrFails == 1 || now - self.ocrFailLoggedAt > 600 {
+                        self.ocrFailLoggedAt = now
+                        log("ocr failed (\(self.ocrFails) in a row): \(error)")
+                    }
+                }
             }
         }
     }

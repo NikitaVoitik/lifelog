@@ -7,6 +7,7 @@
 //   GET  /api/raw/:key                     → a plain R2 object (Range supported)
 //   POST /api/ingest                       → { device, deviceName?, deviceKind?, days?: [...], bundles?: [...], summaries?: [...] }
 //   PUT  /api/upload/:device/:path         → stream a file into R2 at devices/:device/:path   (for the phone app)
+//   PUT  /api/object/:key                  → stream a file into R2 at exactly :key (the laptop; full API token only)
 //   GET  /api/shot?device&day&ts           → the screenshot nearest to ts (within 2 min)
 //   GET  /api/deep/status?device=mac       → raw hours available + deep-analysis runs so far (for the cloud analyst)
 //   POST /api/deep/ingest                  → { device, ts_start, ts_end, segments: [{s,e,c,activity,detail,app}], summaries?, note? }
@@ -333,6 +334,13 @@ async function route(req, env, url) {
   if (p === "/api/phone/events" && req.method === "POST") return phoneEvents(env, await req.json());
   if (p === "/api/phone/since" && req.method === "GET") return json(await phoneSince(env, device, +(url.searchParams.get("seq") || 0)));
   if (p === "/api/phone/status" && req.method === "GET") return json(await phoneStatus(env, device));
+  if ((m = p.match(/^\/api\/object\/(.+)$/)) && req.method === "PUT") {
+    // the laptop's uploads (bundles, raw hours, DB backups): one HTTPS request instead of a wrangler process per file
+    const key = decodeURIComponent(m[1]);
+    if (key.includes("..") || key.startsWith("/")) return json({ error: "bad key" }, 400);
+    const obj = await env.MEDIA.put(key, req.body, { httpMetadata: { contentType: req.headers.get("content-type") || typeOf(key) } });
+    return json({ ok: true, key, size: obj.size });
+  }
   if ((m = p.match(/^\/api\/upload\/([a-z0-9_-]{1,40})\/(.+)$/i)) && req.method === "PUT") {
     const key = `devices/${m[1]}/${decodeURIComponent(m[2])}`;
     if (key.includes("..")) return json({ error: "bad path" }, 400);

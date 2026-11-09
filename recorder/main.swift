@@ -19,7 +19,7 @@ if CommandLine.arguments.contains("--check") {
     print("built-in mic id :", builtInMicID().map(String.init) ?? "none")
     let c = ContextProbe().current()
     print("frontmost       :", c.app, "|", c.title, "|", c.url)
-    print("idle            :", idleSeconds())
+    print("idle (system)   :", systemIdleSeconds())
     print("locked          :", screenLocked())
     exit(0)
 }

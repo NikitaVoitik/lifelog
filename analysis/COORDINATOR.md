@@ -57,6 +57,9 @@ say so in your final message. Never print the token.
 
 - Facts beat guesses: a prompt from the user, their voice ("Me"), an unlock, or keystrokes prove they were there. Unlocking
   the iPhone proves they were awake (not where); steps, motion and places show they were out.
-  Agent-to-agent prompts and coding agents finishing prove nothing about the person.
+  Agent-to-agent prompts and coding agents finishing prove nothing about the person. Neither does "AUTOMATED INPUT": those
+  clicks and cursor moves were injected by software (an agent running a UI test). Since Nov 4 the recorder separates them;
+  before that they were mixed into clicks/mouse, so hours of clicks with zero keys and zero scroll during an agent's UI
+  test run are likely the agent, not the user.
 - Don't invent names, topics or reasons. If it's unclear, say what the evidence suggests.
 - Everything here is private: don't send the data anywhere except back through `ll.py write`.

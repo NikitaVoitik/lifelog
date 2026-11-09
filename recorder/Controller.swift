@@ -129,13 +129,13 @@ final class Recorder {
 
         let ctx = isLocked ? Context(app: "loginwindow", bundle: "com.apple.loginwindow") : probe.current()
         let counts = input.drain()
-        let idle = idleSeconds()
+        let idle = input.idleSeconds()
         mic.watchdog()
         micDB = micWriter.drainPeak()
         sysDB = sysWriter.drainPeak()
-        db.run("INSERT OR REPLACE INTO samples(ts,app,bundle,title,url,idle,keys,clicks,scroll,mouse,mic_db,sys_db,locked) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        db.run("INSERT OR REPLACE INTO samples(ts,app,bundle,title,url,idle,keys,clicks,scroll,mouse,synth,mic_db,sys_db,locked) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                [Int(now), ctx.app, ctx.bundle, ctx.title, ctx.url, (idle * 10).rounded() / 10,
-                counts.keys, counts.clicks, counts.scroll, counts.mouse,
+                counts.keys, counts.clicks, counts.scroll, counts.mouse, counts.synth,
                 micDB.map { Double(($0 * 10).rounded() / 10) }, sysDB.map { Double(($0 * 10).rounded() / 10) }, isLocked])
 
         let switched = ctx.app != lastCtx.app || ctx.title != lastCtx.title || ctx.url != lastCtx.url
