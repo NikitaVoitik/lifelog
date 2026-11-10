@@ -308,9 +308,9 @@ analysis/          deep-analysis toolkit (ll.py) and agent playbooks (COORDINATO
 phone/             iPhone app (SwiftUI): project.yml (xcodegen), Sources/, build.sh, Secrets.example.swift
 tools/             signing-cert.sh, icon generators
 docs/              config.example.json
-install.sh / build.sh / uninstall.sh
+install.sh / build.sh / uninstall.sh / LICENSE
 ```
 
 ## License
 
-No license has been chosen yet, so all rights are reserved by default.
+MIT. See [LICENSE](LICENSE).
