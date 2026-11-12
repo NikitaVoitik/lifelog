@@ -27,9 +27,30 @@ The pipeline bench takes a consistent snapshot with `VACUUM INTO` (one read tran
 
 ## Results (M1 Pro, 2026-11-12)
 
+Micro-benchmarks (median of runs):
+
 | | before | after |
 |---|---|---|
-| frames: CPU per delivered frame | 17.6 ms | 6.7 ms |
-| OCR (accurate mode broken system-wide) | 0 of 14 frames recognised | 14 of 14 (fast fallback, 114 ms CPU each) |
+| frames: CPU per delivered frame | 17.6 ms | 5.5 ms |
+| system audio: CPU per audio-second | 2.4 ms (48 kHz stereo in) | 1.0 ms (16 kHz mono in) |
+| mic: CPU per audio-second | 1.9 ms | 0.9 ms |
+| OCR while accurate mode is broken system-wide | 0 of 14 frames recognised | 14 of 14 (fast fallback) |
 | sync: CPU per run | 2.1 s + 1 wrangler call (~3 s CPU, ~380 MB) | 1.4 s, no wrangler |
 | local media pinned by orphaned audio chunks | 46 GB | freed on the next sync |
+
+The recorder, live: the old and the new build running side by side on the same screen with identical configs
+(mic off in both, so as not to disturb the real recorder):
+
+| | old | new |
+|---|---|---|
+| frames only, 3 min | 3.78% of a core | 1.75% |
+| frames + system audio, 3 min | 6.22% | 3.14% |
+| frames, mostly idle user, 4 min | 2.95% | 0.66% |
+
+The micro-benchmarks miss two things the live runs caught: ScreenCaptureKit's IOSurface is much slower for the
+CPU to read than the bench's buffers (so encode from a copy), and system audio's cost is mostly in receiving
+48 kHz stereo buffers from another process (so ask for 16 kHz mono). Check changes to the capture path live.
+
+OCR is now the largest recorder cost when it works: accurate mode with language correction is ~240–460 ms CPU
+per pass, about one pass every 8.5 s while active. Without language correction it's ~90–150 ms but keeps only
+~94% of the words; fast mode is cheaper still but keeps ~42%.

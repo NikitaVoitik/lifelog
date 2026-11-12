@@ -241,8 +241,9 @@ with Core ML: Silero VAD finds speech, Parakeet transcribes it (25 languages; se
 a diarization model works out who spoke when, and CAM++ voice fingerprints keep the same person's identity across days.
 44 s of two-person conversation takes about 1.4 s on an M1 Pro. Whisper stays installed as a fallback.
 
-**Cost.** About 19 ms per saved frame on an M1 Pro (~2% of one core at 1 fps, zero when the screen is static) and
-~0.8 s per OCR pass. Media is bundled into tars, so R2 sees a few hundred writes a day; storage is about $0.015/GB-month,
+**Cost.** On an M1 Pro the recorder takes about 1–3% of one core for screenshots and system audio while you work
+(under 1% when idle), plus OCR: ~0.25–0.45 s of CPU per pass, about one pass every 10 s while the screen changes.
+`bench/` measures all of it on your own data; see [bench/README.md](bench/README.md). Media is bundled into tars, so R2 sees a few hundred writes a day; storage is about $0.015/GB-month,
 roughly +$1.5–2/month for every month of history kept.
 
 ## Privacy
@@ -303,6 +304,7 @@ recorder/          menu-bar app (Swift, AppKit + SwiftUI); built by build.sh
   PopoverView.swift, SettingsView.swift, Support.swift, main.swift (entry point + self-tests)
 asr/               lifelog-asr: on-device VAD, transcription, diarization, voice fingerprints (Swift package)
 pipeline/          the `lifelog` CLI (lifelog.py), coding-agent log reader (agentlogs.py), report/viewer (report.html)
+bench/             resource benchmarks on your own recorded data (recorder.sh, pipeline.sh)
 cloud/             Cloudflare Worker (src/index.js), D1 schema, wrangler.example.toml, deploy.sh, viewer copy in public/
 analysis/          deep-analysis toolkit (ll.py) and agent playbooks (COORDINATOR.md, CHUNK.md)
 phone/             iPhone app (SwiftUI): project.yml (xcodegen), Sources/, build.sh, Secrets.example.swift
