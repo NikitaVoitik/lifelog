@@ -27,8 +27,10 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
    - `ll.py agents DAY HH:MM HH:MM --full` gives complete prompts and replies. **PROMPT FROM THE USER is certain** (they typed or
      dictated it, or sent it from their phone). Prompts from other agents or schedules are background work, never the person's time.
 5. Write the segments file to OUTPUT (format below), then run `ll.py check OUTPUT` and fix it until it says ok.
-6. Reply in 3–6 lines: the story of the chunk, plus anything the coordinator must know. For example: an activity that runs past
-   TO, a stretch you think is sleep or being out, people and project names you identified, or anything uncertain.
+6. Reply in 3–6 lines. Start with "Read N of N sheets" (the count `sheets` printed); fewer than all of them means the
+   chunk isn't done, so go back and read the rest first. Then the story of the chunk, plus anything the coordinator must
+   know: an activity that runs past TO, a stretch you think is sleep or being out, people and project names you
+   identified, or anything uncertain.
 
 ## Precision
 

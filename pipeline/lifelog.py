@@ -111,7 +111,6 @@ CREATE TABLE IF NOT EXISTS transcripts(
   id INTEGER PRIMARY KEY, chunk_id INTEGER, source TEXT, ts_start REAL, ts_end REAL, text TEXT, lang TEXT);
 CREATE INDEX IF NOT EXISTS transcripts_ts ON transcripts(ts_start);
 CREATE INDEX IF NOT EXISTS transcripts_chunk ON transcripts(chunk_id);
-CREATE INDEX IF NOT EXISTS transcripts_speaker ON transcripts(speaker_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(text);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, ts_start REAL, ts_end REAL, category TEXT, activity TEXT, detail TEXT, app TEXT);
@@ -181,6 +180,7 @@ def migrate(con: sqlite3.Connection) -> None:
     cols = {r[1] for r in con.execute("PRAGMA table_info(transcripts)")}
     if "speaker_id" not in cols:
         con.execute("ALTER TABLE transcripts ADD COLUMN speaker_id INTEGER")
+    con.execute("CREATE INDEX IF NOT EXISTS transcripts_speaker ON transcripts(speaker_id)")  # after the column exists
     cols = {r[1] for r in con.execute("PRAGMA table_info(samples)")}
     if "synth" not in cols:  # input events another process injected (agents driving the cursor); not the user
         con.execute("ALTER TABLE samples ADD COLUMN synth INTEGER")

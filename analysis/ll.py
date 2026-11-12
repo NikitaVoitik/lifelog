@@ -213,7 +213,7 @@ def cmd_status(_):
     if rng:
         a, b = rng
         print(f"\nnext range to analyze: {stamp(a)} → {stamp(b)} ({(b - a) / 3600:.1f} h)"
-              + ("  — more than 14 h: do the first 14 h this run" if b - a > 14 * 3600 else ""))
+              + ("  — more than 16 h: do the first 16 h this run" if b - a > 16 * 3600 else ""))
     else:
         print("\nnothing new to analyze")
 
@@ -446,21 +446,29 @@ def cmd_shots(a):
 
 
 def pil():
-    """Pillow for shrinking frames and building contact sheets; installed on first use (the cloud allows pip)"""
-    try:
-        from PIL import Image
+    """Pillow for shrinking frames and building contact sheets. A system Pillow can be broken (its C module missing,
+    as in the cloud image), so on any import failure install a private copy into the user site and use that."""
+    def load():
+        from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageStat  # noqa: F401  (all must load)
+        Image.new("RGB", (2, 2)).resize((1, 1))  # the C module really works
         return Image
-    except ImportError:
+    try:
+        return load()
+    except Exception:
         import subprocess, site, importlib
-        for extra in (["--user", "--break-system-packages"], ["--break-system-packages"], ["--user"], []):
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", *extra, "pillow"], capture_output=True)
+        for extra in (["--user", "--break-system-packages"], ["--user"], ["--break-system-packages"], []):
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--ignore-installed", *extra, "pillow"],
+                           capture_output=True)
+            for name in [m for m in sys.modules if m == "PIL" or m.startswith("PIL.")]:
+                del sys.modules[name]  # forget the broken copy
+            user = site.getusersitepackages()
+            if user in sys.path:
+                sys.path.remove(user)
+            sys.path.insert(0, user)  # ahead of the system's dist-packages
+            importlib.invalidate_caches()
             try:
-                if site.getusersitepackages() not in sys.path:
-                    sys.path.append(site.getusersitepackages())
-                importlib.invalidate_caches()
-                from PIL import Image
-                return Image
-            except ImportError:
+                return load()
+            except Exception:
                 continue
         return None
 
