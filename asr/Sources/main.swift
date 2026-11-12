@@ -215,6 +215,8 @@ case "embed":
         if a < b { speech.append(contentsOf: samples[a..<b]) }
     }
     if speech.count > 16_000 * 2 { samples = speech }
+    // CAM++ takes at most 6000 fbank frames (60 s); past that CoreML throws instead of embedding
+    if samples.count > 16_000 * 59 { samples = Array(samples.prefix(16_000 * 59)) }
     let emb = try await CampPlusEmbedder.load().embed(audio: samples)
     emit(["embedding": emb.map { Double($0) }, "seconds": r3(Double(samples.count) / 16_000)])
 

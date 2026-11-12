@@ -13,7 +13,7 @@
     lifelog prune --keep-days N        delete screenshots/audio older than N days (text stays)
     lifelog sync [--all-days]          upload media bundles to R2 (wrangler) + timeline to the Worker; frees old local media
     lifelog restore --day D            pull a day's screenshots/audio back from R2
-    lifelog enroll [--file F]          teach it your voice so transcripts say "Me"
+    lifelog enroll [--file F] [--add]  teach it your voice so transcripts say "Me"; --add a second print (e.g. phone audio)
     lifelog voices [name ID NAME | merge ID INTO]   who's been talking; name people once, it remembers
 
 Stdlib only. Needs: ffmpeg, whisper-cli (brew install whisper-cpp), claude CLI.
@@ -48,7 +48,10 @@ DEFAULTS = {
     "transcriber": "fluidaudio",        # "fluidaudio" (Parakeet Ultra + Nemotron 3 speakers, on-device) or "whisper"
     "asrBinary": str(ROOT / "bin/lifelog-asr"),
     "diarize": True,
-    "voiceMatchThreshold": 0.72,        # CAM++ cosine: same voice ≈ 0.9, different people ≈ 0.4–0.7
+    "voiceMatchThreshold": 0.72,        # CAM++ cosine: same voice ≈ 0.85 (even on the phone), different people ≈ 0.3–0.6
+    "voiceMatchThresholdPhone": 0.72,   # same, for the iPhone's far-field mic
+    "voiceMergeThreshold": 0.80,        # folding a whole unnamed voice into a named one rewrites its history: higher bar
+    "voiceNamedPreference": 0.03,       # a named voice beats a closer unnamed one only when it's this close
     "micSpeechThresholdDb": -50,
     "sysSoundThresholdDb": -60,
     "idleThresholdSeconds": 60,
@@ -107,6 +110,8 @@ CREATE TABLE IF NOT EXISTS events(ts REAL, kind TEXT, detail TEXT);
 CREATE TABLE IF NOT EXISTS transcripts(
   id INTEGER PRIMARY KEY, chunk_id INTEGER, source TEXT, ts_start REAL, ts_end REAL, text TEXT, lang TEXT);
 CREATE INDEX IF NOT EXISTS transcripts_ts ON transcripts(ts_start);
+CREATE INDEX IF NOT EXISTS transcripts_chunk ON transcripts(chunk_id);
+CREATE INDEX IF NOT EXISTS transcripts_speaker ON transcripts(speaker_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(text);
 CREATE TABLE IF NOT EXISTS segments(
   id INTEGER PRIMARY KEY, ts_start REAL, ts_end REAL, category TEXT, activity TEXT, detail TEXT, app TEXT);
@@ -272,32 +277,63 @@ def voice_label(row_name, vid) -> str:
     return f"voice #{vid}" if vid else ""
 
 
-def match_voice(con, emb: list[float], seconds: float) -> tuple[int, float]:
-    """returns (voice id, similarity). Unknown voices become new numbered clusters you can name later."""
-    emb = _norm(emb)
-    best_id, best, best_row = None, -1.0, None
-    named_id, named, named_row = None, -1.0, None
+def _person(vid: int, name: str | None):
+    """one person can have several named fingerprints (laptop mic, phone); unnamed voices are each their own person"""
+    return ("name", name.strip().lower()) if name else ("id", vid)
+
+
+def assign_voices(con, speakers: list[dict], source: str) -> dict[int, int]:
+    """one recording's diarizer slots → persistent voice ids.
+
+    - The diarizer already decided the slots are different people, so no two slots get the same person
+      (best matches first). Without this, a whole room collapsed into whichever voice was closest — usually "Me".
+    - Named voices are enrolled fingerprints and never move; only `lifelog enroll` changes them. A running centroid
+      on "Me" absorbed everyone it was matched to and drifted until it matched nearly any voice.
+    - Unnamed voices keep a running centroid so they can settle; a slot that matches nothing starts a new one."""
+    thr = CFG["voiceMatchThresholdPhone"] if source == "phone" else CFG["voiceMatchThreshold"]
+    slots = [(s["slot"], _norm(s["embedding"]), s.get("seconds", 0) or 0) for s in speakers if s.get("embedding")]
+    if not slots:
+        return {}
+    voices = []
     for v in con.execute("SELECT id, name, embedding, n FROM voices"):
-        sim = _cos(emb, json.loads(v["embedding"]))
-        if sim > best:
-            best_id, best, best_row = v["id"], sim, v
-        if v["name"] and sim > named:
-            named_id, named, named_row = v["id"], sim, v
-    # a voice you've named wins over a closer unnamed cluster when both pass the bar — otherwise an early
-    # unnamed cluster of your own voice keeps out-competing your enrollment forever
-    if named_row is not None and named >= CFG["voiceMatchThreshold"]:
-        best_id, best, best_row = named_id, named, named_row
+        # your own voice isn't played back through the speakers, so computer audio is never "Me"
+        if source == "sys" and (v["name"] or "").strip().lower() == "me":
+            continue
+        voices.append((v["id"], v["name"], v["n"], json.loads(v["embedding"])))
+    cands = []
+    for slot, emb, _ in slots:
+        for vid, name, _, ve in voices:
+            sim = _cos(emb, ve)
+            if sim >= thr:
+                # a named voice beats a slightly closer unnamed cluster (an early cluster of your own voice
+                # shouldn't out-compete your enrollment forever), but not a clearly closer one
+                cands.append((sim + (CFG["voiceNamedPreference"] if name else 0.0), slot, vid))
+    cands.sort(reverse=True)
+    by_id = {v[0]: v for v in voices}
+    out: dict[int, int] = {}
+    taken: set = set()
+    for _, slot, vid in cands:
+        who = _person(vid, by_id[vid][1])
+        if slot in out or who in taken:
+            continue
+        out[slot] = vid
+        taken.add(who)
     now = time.time()
-    if best_row is not None and best >= CFG["voiceMatchThreshold"]:
-        n = min(best_row["n"], 50)  # running centroid, capped so it can still adapt
-        old = json.loads(best_row["embedding"])
-        cen = _norm([(o * n + e) / (n + 1) for o, e in zip(old, emb)])
-        con.execute("UPDATE voices SET embedding=?, n=n+1, seconds=seconds+?, last_heard=? WHERE id=?",
-                    (json.dumps([round(x, 5) for x in cen]), seconds, now, best_id))
-        return best_id, best
-    cur = con.execute("INSERT INTO voices(name, embedding, n, seconds, first_heard, last_heard) VALUES(NULL,?,1,?,?,?)",
-                      (json.dumps([round(x, 5) for x in emb]), seconds, now, now))
-    return cur.lastrowid, best
+    for slot, emb, seconds in slots:
+        vid = out.get(slot)
+        if vid is None:
+            out[slot] = con.execute("INSERT INTO voices(name, embedding, n, seconds, first_heard, last_heard) VALUES(NULL,?,1,?,?,?)",
+                                    (json.dumps([round(x, 5) for x in emb]), seconds, now, now)).lastrowid
+            continue
+        _, name, n, old = by_id[vid]
+        if name:
+            con.execute("UPDATE voices SET n=n+1, seconds=seconds+?, last_heard=? WHERE id=?", (seconds, now, vid))
+        else:
+            n = min(n, 50)  # running centroid, capped so it can still adapt
+            cen = _norm([(o * n + e) / (n + 1) for o, e in zip(old, emb)])
+            con.execute("UPDATE voices SET embedding=?, n=n+1, seconds=seconds+?, last_heard=? WHERE id=?",
+                        (json.dumps([round(x, 5) for x in cen]), seconds, now, vid))
+    return out
 
 
 def transcribe_fluid(con, rows, binary: Path) -> int:
@@ -320,12 +356,7 @@ def transcribe_fluid(con, rows, binary: Path) -> int:
                 con.execute("UPDATE audio_chunks SET transcribed=3 WHERE id=?", (r["id"],))
                 con.commit()
                 continue
-            # voice slots (per recording) → persistent voice ids
-            slot_voice: dict[int, int] = {}
-            for spk in res.get("speakers", []):
-                if spk.get("embedding"):
-                    vid, _ = match_voice(con, spk["embedding"], spk.get("seconds", 0))
-                    slot_voice[spk["slot"]] = vid
+            slot_voice = assign_voices(con, res.get("speakers", []), r["source"])
             # words → utterances: split on speaker change or a pause > 1.2 s
             utts: list[dict] = []
             for s, e, w, conf, slot in res.get("words", []):
@@ -427,15 +458,25 @@ def list_voices(con) -> None:
     print("\nname one:  lifelog voices name <id> <name>   (use 'Me' for yourself)   ·   merge:  lifelog voices merge <id> <into-id>")
 
 
+def _heard_together(con, vid: int, name: str) -> bool:
+    """were voice `vid` and person `name` separate speakers in the same recording? Then they're different people."""
+    ids = [r[0] for r in con.execute("SELECT id FROM voices WHERE lower(trim(name))=lower(trim(?))", (name,))]
+    if not ids:
+        return False
+    return con.execute(f"SELECT 1 FROM transcripts a WHERE a.speaker_id=? AND EXISTS (SELECT 1 FROM transcripts b "
+                       f"WHERE b.chunk_id=a.chunk_id AND b.speaker_id IN ({','.join('?' * len(ids))})) LIMIT 1",
+                       (vid, *ids)).fetchone() is not None
+
+
 def consolidate_voices(con) -> None:
-    """fold unnamed clusters into a named voice once their centroids pass the match bar (same rule enroll uses)"""
+    """fold unnamed voices into a named one once their centroids are clearly that person (same rule enroll uses)"""
     named = [(v["id"], v["name"], json.loads(v["embedding"])) for v in con.execute("SELECT id, name, embedding FROM voices WHERE name IS NOT NULL")]
     if not named:
         return
     for v in con.execute("SELECT id, embedding FROM voices WHERE name IS NULL").fetchall():
         e = json.loads(v["embedding"])
         sim, vid, name = max((_cos(e, ne), nid, nm) for nid, nm, ne in named)
-        if sim >= CFG["voiceMatchThreshold"]:
+        if sim >= CFG["voiceMergeThreshold"] and not _heard_together(con, v["id"], name):
             print(f"  voice #{v['id']} is {name} ({sim:.2f})")
             merge_voices(con, v["id"], vid)
 
@@ -448,7 +489,8 @@ def merge_voices(con, src: int, dst: int) -> None:
         return
     ea, eb = json.loads(a["embedding"]), json.loads(b["embedding"])
     na, nb = min(a["n"], 50), min(b["n"], 50)
-    cen = _norm([(x * na + y * nb) / (na + nb) for x, y in zip(ea, eb)])
+    # a named voice keeps its enrolled fingerprint: averaging merged clusters into it is how "Me" drifted onto everyone
+    cen = eb if b["name"] else _norm([(x * na + y * nb) / (na + nb) for x, y in zip(ea, eb)])
     con.execute("UPDATE voices SET embedding=?, n=?, seconds=seconds+?, name=COALESCE(name, ?) WHERE id=?",
                 (json.dumps(cen), a["n"] + b["n"], a["seconds"] or 0, a["name"], dst))
     con.execute("UPDATE transcripts SET speaker_id=? WHERE speaker_id=?", (dst, src))
@@ -457,7 +499,9 @@ def merge_voices(con, src: int, dst: int) -> None:
     print(f"merged voice #{src} into #{dst} ({b['name'] or 'unnamed'})")
 
 
-def enroll(con, file: str | None, seconds: int, name: str) -> None:
+def enroll(con, file: str | None, seconds: int, name: str, add: bool = False) -> None:
+    """set a person's voice fingerprint. --add keeps their existing one(s) and adds another — e.g. a recording made on
+    the phone, whose far-field mic makes the same voice sound different from the laptop's."""
     binary = Path(CFG["asrBinary"]).expanduser()
     if not binary.exists():
         sys.exit(f"{binary} missing — run install.sh")
@@ -478,8 +522,8 @@ def enroll(con, file: str | None, seconds: int, name: str) -> None:
         sys.exit(f"only heard {res.get('seconds', 0):.0f}s of speech — try again a bit closer to the mic")
     emb = _norm(res["embedding"])
     now = time.time()
-    row = con.execute("SELECT id FROM voices WHERE lower(name)=lower(?)", (name,)).fetchone()
-    if row:
+    row = con.execute("SELECT id FROM voices WHERE lower(trim(name))=lower(trim(?)) ORDER BY id", (name,)).fetchone()
+    if row and not add:  # replaces their first fingerprint; any added with --add stay
         con.execute("UPDATE voices SET embedding=?, n=10, last_heard=? WHERE id=?", (json.dumps(emb), now, row["id"]))
         vid = row["id"]
     else:
@@ -487,11 +531,7 @@ def enroll(con, file: str | None, seconds: int, name: str) -> None:
                           (name, json.dumps(emb), now, now)).lastrowid
     con.commit()
     print(f"enrolled '{name}' as voice #{vid} from {res['seconds']:.0f}s of speech")
-    # relabel unnamed voices that are clearly this person
-    for v in con.execute("SELECT id, embedding FROM voices WHERE name IS NULL").fetchall():
-        sim = _cos(emb, json.loads(v["embedding"]))
-        if sim >= CFG["voiceMatchThreshold"]:
-            merge_voices(con, v["id"], vid)
+    consolidate_voices(con)  # relabel unnamed voices that are clearly this person
 
 
 # ---------------------------------------------------------------- coding-agent logs (Claude Code, Codex, Delta)
@@ -2154,6 +2194,7 @@ def main() -> None:
     p.add_argument("args", nargs="*")
     p = sub.add_parser("enroll", help="teach it your voice (or someone else's with --name)")
     p.add_argument("--file"); p.add_argument("--seconds", type=int, default=20); p.add_argument("--name", default="Me")
+    p.add_argument("--add", action="store_true", help="add another fingerprint (e.g. from phone audio) instead of replacing")
     p = sub.add_parser("restore"); p.add_argument("--day", required=True)
     p = sub.add_parser("agents", help="pull T3 / Claude Code / Codex / Delta logs now and list today's prompts")
     p.add_argument("--day", default=None)
@@ -2198,7 +2239,7 @@ def main() -> None:
         else:
             print("usage: lifelog voices [list] | name <id> <name> | merge <id> <into-id>")
     elif a.cmd == "enroll":
-        enroll(con, a.file, a.seconds, a.name)
+        enroll(con, a.file, a.seconds, a.name, a.add)
     elif a.cmd == "restore":
         restore(con, a.day)
     elif a.cmd == "agents":
