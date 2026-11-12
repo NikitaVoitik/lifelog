@@ -284,6 +284,11 @@ final class InputMonitor {
     }
 
     private func handle(_ type: CGEventType, _ e: CGEvent) {
+        if type == .tapDisabledByUserInput && moveResumeScheduled {
+            // that's us pausing the move tap (throttleMoves); just make sure the main tap is still on
+            if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
+            return
+        }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             // "user input" here usually means macOS pulled Input Monitoring (e.g. after a rebuild changed the binary)
             log("input tap: disabled by \(type == .tapDisabledByTimeout ? "timeout" : "the system (check Input Monitoring)"), re-enabling")
