@@ -242,7 +242,7 @@ a diarization model works out who spoke when, and CAM++ voice fingerprints keep 
 44 s of two-person conversation takes about 1.4 s on an M1 Pro. Whisper stays installed as a fallback.
 
 **Cost.** On an M1 Pro the recorder takes about 1–3% of one core for screenshots and system audio while you work
-(under 1% when idle), plus OCR: ~0.25–0.45 s of CPU per pass, about one pass every 10 s while the screen changes.
+(under 1% when idle), plus OCR: ~0.1–0.15 s of CPU per pass, about one pass every 10 s while the screen changes.
 `bench/` measures all of it on your own data; see [bench/README.md](bench/README.md). Media is bundled into tars, so R2 sees a few hundred writes a day; storage is about $0.015/GB-month,
 roughly +$1.5–2/month for every month of history kept.
 

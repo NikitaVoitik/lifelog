@@ -51,6 +51,6 @@ The micro-benchmarks miss two things the live runs caught: ScreenCaptureKit's IO
 CPU to read than the bench's buffers (so encode from a copy), and system audio's cost is mostly in receiving
 48 kHz stereo buffers from another process (so ask for 16 kHz mono). Check changes to the capture path live.
 
-OCR is now the largest recorder cost when it works: accurate mode with language correction is ~240–460 ms CPU
-per pass, about one pass every 8.5 s while active. Without language correction it's ~90–150 ms but keeps only
-~94% of the words; fast mode is cheaper still but keeps ~42%.
+OCR is the largest recorder cost when it works, about one pass every 8.5 s while active. Accurate mode with
+language correction was ~240–460 ms CPU per pass; without it (now the setting) ~90–150 ms, keeping ~94% of the
+same words. Fast mode, the fallback while accurate is broken, keeps ~42%.
