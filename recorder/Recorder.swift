@@ -541,8 +541,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         if audioSink != nil {
             conf.capturesAudio = true
             conf.excludesCurrentProcessAudio = true
-            conf.sampleRate = 48000
-            conf.channelCount = 2
+            // what the chunk writer stores anyway: macOS hands over 1/6 of the data and we skip resampling it
+            conf.sampleRate = Int(ChunkedAudioWriter.sampleRate)
+            conf.channelCount = 1
         } else {
             conf.capturesAudio = false
         }
@@ -642,9 +643,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         // decide from the raw pixels first: most delivered frames are dropped and never need a CGImage
         let thumb = Self.thumbnail(pb)
         if !force, let last = lastThumb, !Self.changed(thumb, last) { return }
-        var cgOut: CGImage?
-        VTCreateCGImageFromCVPixelBuffer(pb, options: nil, imageOut: &cgOut)
-        guard let img = cgOut else { return }
+        guard let img = Self.cpuImage(pb) else { return }
         lastThumb = thumb
         lock.lock(); forceNext = false; lock.unlock()
 
@@ -677,12 +676,37 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         let f = DateFormatter()
         f.dateFormat = "HHmmss_SSS"
         let url = dir.appendingPathComponent("\(f.string(from: d)).jpg")
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+        // encode in memory and write once: straight to a file, ImageIO issues hundreds of small writes per frame
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
             throw NSError(domain: "lifelog", code: 2)
         }
         CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: cfg.jpegQuality] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw NSError(domain: "lifelog", code: 3) }
+        try data.write(to: url)
         return url
+    }
+
+    /// The frame as a CGImage over ordinary memory. ScreenCaptureKit's IOSurface is slow for the CPU to read in the
+    /// scattered pattern the JPEG encoder and Vision use (it made encoding ~2.6x slower than from a copy); one
+    /// sequential copy is cheaper. Keeps the frame's colour space so the JPEG is tagged as before.
+    static func cpuImage(_ pb: CVPixelBuffer) -> CGImage? {
+        var vtOut: CGImage?
+        VTCreateCGImageFromCVPixelBuffer(pb, options: nil, imageOut: &vtOut)
+        guard let vt = vtOut, CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_32BGRA else { return vtOut }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let src = CVPixelBufferGetBaseAddress(pb) else { return vt }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), srb = CVPixelBufferGetBytesPerRow(pb)
+        let rb = w * 4
+        guard let copy = CFDataCreateMutable(nil, rb * h) else { return vt }
+        CFDataSetLength(copy, rb * h)
+        let dst = CFDataGetMutableBytePtr(copy)!
+        if srb == rb { memcpy(dst, src, rb * h) } else { for y in 0..<h { memcpy(dst + y * rb, src + y * srb, rb) } }
+        guard let provider = CGDataProvider(data: copy) else { return vt }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: rb,
+                       space: vt.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: vt.bitmapInfo,
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) ?? vt
     }
 
     /// OCR only every `ocrInterval` seconds (and on every app/tab switch) — frames in between are kept as images only.
@@ -859,7 +883,9 @@ final class ChunkedAudioWriter {
     private let db: DB
     private let chunkSeconds: Double
     private let lock = NSLock()
-    private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+    static let sampleRate: Double = 16000
+    private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false)!
+    private var pending: AVAudioPCMBuffer?  // converted audio not written yet (see stage)
     private var converter: AVAudioConverter?
     private var converterIn: AVAudioFormat?
     private var file: AVAudioFile?
@@ -910,9 +936,28 @@ final class ChunkedAudioWriter {
             status.pointee = .haveData
             return buf
         }
-        if err == nil && out.frameLength > 0 {
-            do { try file.write(from: out) } catch { log("\(source) write error: \(error)") }
+        if err == nil && out.frameLength > 0 { stage(out, to: file) }
+    }
+
+    /// Converted audio is collected for ~1 s and written in one go: writing each 20–90 ms capture buffer as it came
+    /// meant an AAC encode call and a file write per buffer, dozens of times a second.
+    private func stage(_ out: AVAudioPCMBuffer, to file: AVAudioFile) {
+        if pending == nil { pending = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: AVAudioFrameCount(Self.sampleRate)) }
+        guard let p = pending else { return }
+        var from: AVAudioFrameCount = 0
+        while from < out.frameLength {
+            let n = min(out.frameLength - from, p.frameCapacity - p.frameLength)
+            memcpy(p.floatChannelData![0] + Int(p.frameLength), out.floatChannelData![0] + Int(from), Int(n) * 4)
+            p.frameLength += n
+            from += n
+            if p.frameLength == p.frameCapacity { flushLocked(file) }
         }
+    }
+
+    private func flushLocked(_ file: AVAudioFile?) {
+        guard let p = pending, p.frameLength > 0, let file else { return }
+        do { try file.write(from: p) } catch { log("\(source) write error: \(error)") }
+        p.frameLength = 0
     }
 
     private func openLocked(now: Double, slot: Int, bufferDuration: Double) {
@@ -938,6 +983,7 @@ final class ChunkedAudioWriter {
 
     private func closeLocked() {
         guard file != nil else { return }
+        flushLocked(file)
         if #available(macOS 15.0, *) { file?.close() }
         file = nil
         db.run("UPDATE audio_chunks SET ts_end=?, peak_db=? WHERE id=?", [lastBufferAt, chunkPeak, chunkId])

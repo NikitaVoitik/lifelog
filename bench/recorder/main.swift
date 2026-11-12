@@ -3,7 +3,9 @@
 //
 //   frames <screens dir> <n>   replay n real screenshots as BGRA IOSurface frames; every real frame is followed by a
 //                              near-duplicate (2 px caret blink) like the ones ScreenCaptureKit delivers between changes
-//   audio  <m4a> <seconds>     system-audio path: 48 kHz stereo 1024-frame CMSampleBuffers → pcm() → ChunkedAudioWriter
+//   audio  <m4a> <seconds>     system-audio path: CMSampleBuffers at the rate/channels the recorder asks
+//                              ScreenCaptureKit for (BENCH_SYS_RATE/BENCH_SYS_CH override: 48000/2 = the old setup)
+//                              → pcm() → ChunkedAudioWriter
 //   mic    <m4a> <seconds>     mic path: 48 kHz mono 4096-frame AVAudioPCMBuffers → ChunkedAudioWriter
 //   ocr    <screens dir> <n>   the recorder's OCR request on n real screenshots
 //   tick   <seconds>           the 1-second sampler's work minus AX (sample insert), at full speed
@@ -176,15 +178,15 @@ func benchFrames(_ dir: String, _ n: Int) {
 }
 
 /// 16 kHz mono file → `seconds` of 48 kHz audio with `channels` channels, as float32 non-interleaved
-func loadAudio(_ path: String, seconds: Double, channels: AVAudioChannelCount) -> AVAudioPCMBuffer {
+func loadAudio(_ path: String, seconds: Double, channels: AVAudioChannelCount, rate: Double = 48000) -> AVAudioPCMBuffer {
     let f = try! AVAudioFile(forReading: URL(fileURLWithPath: path))
     let src = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length))!
     try! f.read(into: src)
-    let outFmt = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: channels)!
-    let total = AVAudioFrameCount(seconds * 48000)
+    let outFmt = AVAudioFormat(standardFormatWithSampleRate: rate, channels: channels)!
+    let total = AVAudioFrameCount(seconds * rate)
     let out = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: total)!
     let conv = AVAudioConverter(from: src.format, to: outFmt)!
-    let up = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: AVAudioFrameCount(Double(src.frameLength) * 48000 / src.format.sampleRate) + 1024)!
+    let up = AVAudioPCMBuffer(pcmFormat: outFmt, frameCapacity: AVAudioFrameCount(Double(src.frameLength) * rate / src.format.sampleRate) + 1024)!
     var fed = false
     conv.convert(to: up, error: nil) { _, st in
         if fed { st.pointee = .endOfStream; return nil }
@@ -209,7 +211,7 @@ func sampleBuffer(_ pcm: AVAudioPCMBuffer, from: Int, frames: Int) -> CMSampleBu
     var sb: CMSampleBuffer?
     CMAudioSampleBufferCreateWithPacketDescriptions(allocator: nil, dataBuffer: nil, dataReady: false, makeDataReadyCallback: nil,
                                                     refcon: nil, formatDescription: fmtDesc!, sampleCount: frames,
-                                                    presentationTimeStamp: CMTime(value: CMTimeValue(from), timescale: 48000),
+                                                    presentationTimeStamp: CMTime(value: CMTimeValue(from), timescale: CMTimeScale(pcm.format.sampleRate)),
                                                     packetDescriptions: nil, sampleBufferOut: &sb)
     let tmp = AVAudioPCMBuffer(pcmFormat: pcm.format, frameCapacity: AVAudioFrameCount(frames))!
     tmp.frameLength = AVAudioFrameCount(frames)
@@ -220,9 +222,12 @@ func sampleBuffer(_ pcm: AVAudioPCMBuffer, from: Int, frames: Int) -> CMSampleBu
 }
 
 func benchAudio(_ path: String, seconds: Double, mic: Bool) {
-    let channels: AVAudioChannelCount = mic ? 1 : 2
-    let per = mic ? 4096 : 1024
-    let pcm = loadAudio(path, seconds: seconds, channels: channels)
+    let env = ProcessInfo.processInfo.environment
+    let sysRate = Double(env["BENCH_SYS_RATE"] ?? "") ?? ChunkedAudioWriter.sampleRate
+    let channels: AVAudioChannelCount = mic ? 1 : AVAudioChannelCount(env["BENCH_SYS_CH"] ?? "") ?? 1
+    let rate = mic ? 48000 : sysRate
+    let per = mic ? 4096 : Int(1024 * rate / 48000)  // ScreenCaptureKit: ~21 ms buffers
+    let pcm = loadAudio(path, seconds: seconds, channels: channels, rate: rate)
     let db = DB(path: rootDir.appendingPathComponent("lifelog.db").path)
     let w = ChunkedAudioWriter(source: mic ? "benchmic" : "benchsys", db: db, chunkSeconds: 100_000)
     var cpu = 0.0
