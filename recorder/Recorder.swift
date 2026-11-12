@@ -686,10 +686,10 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// OCR only every `ocrInterval` seconds (and on every app/tab switch) — frames in between are kept as images only.
-    static func ocrRequest() -> VNRecognizeTextRequest {
+    static func ocrRequest(_ level: VNRequestTextRecognitionLevel = .accurate) -> VNRecognizeTextRequest {
         let req = VNRecognizeTextRequest()
-        req.recognitionLevel = .accurate
-        req.usesLanguageCorrection = true
+        req.recognitionLevel = level
+        req.usesLanguageCorrection = level == .accurate
         req.recognitionLanguages = Self.ocrLanguages
         return req
     }
@@ -704,30 +704,60 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         return obs.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
 
-    func ocrForBench(_ img: CGImage) -> String? {
-        let req = Self.ocrRequest()
-        do { try VNImageRequestHandler(cgImage: img).perform([req]) } catch { return nil }
-        return Self.ocrText(req)
+    /// Accurate OCR runs a Core ML model that macOS sometimes can't load for hours (e5rtError … 13, system-wide, until a
+    /// restart), which used to mean no screen text at all. When it fails, the frame is redone in .fast mode (Vision's
+    /// older engine, no Core ML) and fast is used until accurate is tried again 15 min later. Only touched on ocrQueue.
+    private var accurateRetryAt: Double = 0
+    static let accurateRetrySeconds: Double = 900
+
+    /// runs the OCR (on the calling thread); nil = failed in both modes
+    private func recognize(_ img: CGImage, track req: ((VNRecognizeTextRequest) -> Void)? = nil) -> (text: String, level: String)? {
+        let now = Date().timeIntervalSince1970
+        var firstError: Error?
+        if now >= accurateRetryAt {
+            let r = Self.ocrRequest(.accurate)
+            req?(r)
+            do {
+                try VNImageRequestHandler(cgImage: img).perform([r])
+                if accurateRetryAt > 0 { log("ocr: accurate mode works again"); accurateRetryAt = 0 }
+                return (Self.ocrText(r), "accurate")
+            } catch {
+                if error is CancellationError { return nil }
+                if accurateRetryAt == 0 { log("ocr: accurate mode failed (\(error)); using fast mode, retrying accurate every 15 min") }
+                accurateRetryAt = now + Self.accurateRetrySeconds
+                firstError = error
+            }
+        }
+        let r = Self.ocrRequest(.fast)
+        req?(r)
+        do {
+            try VNImageRequestHandler(cgImage: img).perform([r])
+            return (Self.ocrText(r), "fast")
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+        if let e = firstError { lastOCRError = "\(e)" }
+        return nil
     }
+    private var lastOCRError = ""
+
+    func ocrForBench(_ img: CGImage) -> (text: String, level: String)? { recognize(img) }
 
     private func ocr(_ img: CGImage, id: Int64) {
-        let req = Self.ocrRequest()
-        ocrBusy = true; ocrStartedAt = Date().timeIntervalSince1970; ocrReq = req
+        ocrBusy = true; ocrStartedAt = Date().timeIntervalSince1970
         ocrQueue.async {
             defer { self.frameQueue.async { self.ocrBusy = false; self.ocrReq = nil } }
-            do {
-                try VNImageRequestHandler(cgImage: img).perform([req])
-                let text = Self.ocrText(req)
-                self.db.run("UPDATE screenshots SET ocr=? WHERE id=?", [text, id])
-                self.db.run("INSERT INTO ocr_fts(rowid, text) VALUES(?,?)", [id, text])
+            if let res = self.recognize(img, track: { r in self.frameQueue.async { self.ocrReq = r } }) {
+                self.db.run("UPDATE screenshots SET ocr=? WHERE id=?", [res.text, id])
+                self.db.run("INSERT INTO ocr_fts(rowid, text) VALUES(?,?)", [id, res.text])
                 self.frameQueue.async { self.ocrFails = 0 }
-            } catch {
-                let now = Date().timeIntervalSince1970
+            } else {
+                let now = Date().timeIntervalSince1970, err = self.lastOCRError
                 self.frameQueue.async {  // one line per 10 min while it keeps failing, not one per frame
                     self.ocrFails += 1
                     if self.ocrFails == 1 || now - self.ocrFailLoggedAt > 600 {
                         self.ocrFailLoggedAt = now
-                        log("ocr failed (\(self.ocrFails) in a row): \(error)")
+                        log("ocr failed (\(self.ocrFails) in a row): \(err)")
                     }
                 }
             }

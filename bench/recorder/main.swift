@@ -267,13 +267,14 @@ func benchOCR(_ dir: String, _ n: Int) {
     let cap = ScreenCapturer(db: db, cfg: cfg)
     _ = cap.ocrForBench(imgs[0])  // model load
     let c0 = cpuSeconds(), w0 = Date()
-    var chars = 0, fails = 0
+    var chars = 0, fails = 0, fast = 0
     for img in imgs.dropFirst() {
-        if let t = cap.ocrForBench(img) { chars += t.count } else { fails += 1 }
+        if let t = cap.ocrForBench(img) { chars += t.text.count; if t.level == "fast" { fast += 1 } } else { fails += 1 }
     }
     let k = Double(imgs.count - 1)
     report("ocr", ["frames": imgs.count - 1, "cpu_ms_per_frame": (cpuSeconds() - c0) / k * 1000,
-                   "wall_ms_per_frame": Date().timeIntervalSince(w0) / k * 1000, "chars_per_frame": Double(chars) / k, "fails": fails])
+                   "wall_ms_per_frame": Date().timeIntervalSince(w0) / k * 1000, "chars_per_frame": Double(chars) / k,
+                   "fails": fails, "fast_mode_frames": fast])
 }
 
 func benchTick(_ seconds: Int) {
