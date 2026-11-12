@@ -69,7 +69,7 @@ DEFAULTS = {
     "cloudToken": "",          # API token (set by cloud/deploy.sh)
     "localMediaKeepDays": 3,   # screenshots/audio stay on disk this long, then only in R2 (once uploaded)
     "syncOnExpensiveNetwork": False,  # don't upload gigabytes over a phone hotspot
-    "bundleMaxBytes": 200_000_000,
+    "bundleMaxBytes": 200_000_000,  # capped at ~94 MB while uploading through the Worker (see bundle_limit)
     "dbBackupEveryDays": 1,
     "dbBackupsToKeep": 7,
     "wranglerLocal": "",       # testing only: persist dir for `wrangler --local`
@@ -227,6 +227,23 @@ HALLUCINATIONS = re.compile(
 )
 
 
+def close_orphan_chunks(con) -> int:
+    """A chunk the recorder never closed (it was killed or crashed mid-chunk) keeps ts_end NULL forever. That used to
+    block its hour's audio upload, and so the freeing of that whole day's media (tens of GB), and to make every later
+    hour "wait for audio to be transcribed". Chunks are at most a few minutes long, so one still open after 30 min is
+    an orphan: end it when its file was last written (often unreadable — no moov atom — and then marked failed)."""
+    rows = con.execute("SELECT id, ts_start, path FROM audio_chunks WHERE ts_end IS NULL AND ts_start<?",
+                       (time.time() - 1800,)).fetchall()
+    for r in rows:
+        f = ROOT / r["path"]
+        end = min(f.stat().st_mtime, r["ts_start"] + 3600) if f.exists() else r["ts_start"]
+        con.execute("UPDATE audio_chunks SET ts_end=? WHERE id=?", (max(end, r["ts_start"]), r["id"]))
+    if rows:
+        con.commit()
+        print(f"  closed {len(rows)} audio chunk(s) the recorder never finished")
+    return len(rows)
+
+
 def pending_chunks(con, limit: int | None) -> list:
     """closed chunks not transcribed yet; silent / missing ones are marked and skipped here"""
     out = []
@@ -243,6 +260,7 @@ def pending_chunks(con, limit: int | None) -> list:
 
 
 def transcribe(con: sqlite3.Connection, limit: int | None = None) -> int:
+    close_orphan_chunks(con)
     rows = pending_chunks(con, limit)
     if not rows:
         return 0
@@ -1749,6 +1767,13 @@ def api(path: str, body: dict | None = None, method: str = "POST") -> dict:
         return json.loads(r.read())
 
 
+def bundle_limit() -> int:
+    """bundles that fit one PUT through the Worker; a bigger one goes through `wrangler`, a Node process that costs
+    ~3 s CPU and ~380 MB per 150 MB bundle — every 10 minutes"""
+    direct = bool(CFG.get("cloudUrl")) and not CFG.get("wranglerLocal")
+    return min(CFG["bundleMaxBytes"], R2_HTTP_MAX - 1_000_000) if direct else CFG["bundleMaxBytes"]
+
+
 def make_tar(files: list[tuple[Path, str]], out: Path) -> list[list]:
     """uncompressed tar (JPEG/AAC are already compressed); returns [[name, data_offset, size], ...]"""
     import tarfile
@@ -1779,10 +1804,18 @@ def screen_slot(name: str) -> str | None:
     return f"{m.group(1)}{int(m.group(2)) // 10 * 10:02d}" if m else None
 
 
-def uploaded_index(con) -> tuple[dict, dict]:
+def local_media_days() -> list[str]:
+    media = ROOT / "media"
+    return sorted(d.name for d in media.iterdir() if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name)) if media.exists() else []
+
+
+def uploaded_index(con, days: list[str]) -> tuple[dict, dict]:
+    """which files of these days are already in R2. Only the days asked for: every bundle's file list is a few hundred
+    entries of JSON, and parsing all of history (35 MB and growing ~5 MB a day) took most of each sync's CPU."""
     done: dict[tuple, set] = collections.defaultdict(set)
     parts: dict[tuple, int] = collections.defaultdict(int)
-    for r in con.execute("SELECT kind, day, slot, files FROM uploads WHERE kind IN ('screens','audio')"):
+    for r in con.execute(f"SELECT kind, day, slot, files FROM uploads WHERE kind IN ('screens','audio') AND day IN ({','.join('?' * len(days))})",
+                         days):
         k = (r["kind"], r["day"], r["slot"])
         done[k].update(f[0] for f in json.loads(r["files"]))
         parts[k] += 1
@@ -1809,9 +1842,10 @@ def upload_media(con, now: float) -> tuple[int, int]:
     media = ROOT / "media"
     if not media.exists():
         return 0, 0
-    done, parts = uploaded_index(con)
+    days = local_media_days()
+    done, parts = uploaded_index(con, days)
     n_bundles = n_bytes = 0
-    for daydir in sorted(d for d in media.iterdir() if d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name)):
+    for daydir in [media / d for d in days]:
         day = daydir.name
         ds, de = day_bounds(day)
         # screenshots → 10-minute slots
@@ -1829,7 +1863,7 @@ def upload_media(con, now: float) -> tuple[int, int]:
                 continue
             meta = {Path(r["path"]).name: [r["ts"], r["app"] or "", (r["title"] or "")[:120]] for r in con.execute(
                 "SELECT ts, path, app, title FROM screenshots WHERE ts>=? AND ts<?", (slot_start - 1, slot_start + 601))}
-            for chunk in split_by_size(new, CFG["bundleMaxBytes"]):
+            for chunk in split_by_size(new, bundle_limit()):
                 entries = [(f, meta.get(f.name, [0, "", ""])) for f in chunk]
                 n_bytes += upload_bundle(con, "screens", day, slot, parts[k], entries)
                 parts[k] += 1
@@ -2056,13 +2090,13 @@ def free_local_media(con) -> None:
     if keep is None or keep < 0:
         return
     cutoff = (dt.date.today() - dt.timedelta(days=keep)).isoformat()
-    done, _ = uploaded_index(con)
+    done, _ = uploaded_index(con, [d for d in local_media_days() if d < cutoff])
     registered = {r[0] for r in con.execute("SELECT key FROM uploads WHERE registered=1")}
     unregistered = con.execute("SELECT COUNT(*) FROM uploads WHERE registered=0 AND kind IN ('screens','audio')").fetchone()[0]
     if unregistered and CFG.get("cloudUrl"):
         return  # wait until the Worker knows about every bundle
     _ = registered
-    for daydir in sorted(d for d in (ROOT / "media").iterdir() if d.is_dir() and d.name < cutoff):
+    for daydir in [ROOT / "media" / d for d in local_media_days() if d < cutoff]:
         day = daydir.name
         missing = 0
         for f in (daydir / "screens").glob("*.jpg") if (daydir / "screens").exists() else []:
@@ -2094,6 +2128,7 @@ def sync(con, all_days: bool = False) -> None:
         return
     t0 = time.time()
     try:
+        close_orphan_chunks(con)
         n, b = upload_media(con, time.time())
         print(f"media: {n} bundle(s), {b / 1e6:.1f} MB uploaded")
         if CFG.get("cloudUrl") and CFG.get("cloudToken"):
