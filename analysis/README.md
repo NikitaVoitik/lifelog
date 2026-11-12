@@ -13,7 +13,7 @@ at second-level detail, in the cloud, without touching the laptop:
 
 ## Running it
 
-Schedule a Claude Code routine (e.g. every 4 hours) on a checkout of this repo with the contents of `COORDINATOR.md` as
+Schedule a Claude Code routine (twice a day is enough: each run catches up on everything since the last) on a checkout of this repo with the contents of `COORDINATOR.md` as
 its prompt. Its environment needs:
 
 - `LIFELOG_URL`: your Worker URL (`cloudUrl`)

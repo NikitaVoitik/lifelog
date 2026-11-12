@@ -11,6 +11,7 @@ All times are the person's local time (the tool switches to their timezone itsel
     ll.py log DAY FROM TO [--full]            the time-ordered raw log (what the quick analysis sees); --full = no trimming
     ll.py ocr DAY FROM TO [--grep WORD]       all screen text, every OCR'd frame
     ll.py shot DAY HH:MM:SS                   download the screenshot nearest that second → prints a path to Read
+    ll.py sheets DAY FROM TO                  contact sheets (3×3 labeled tiles) of the frames that show something new → paths to Read
     ll.py frames DAY FROM TO                  EVERY screenshot taken while active (960 px, exact repeats collapsed) → paths to Read
     ll.py shots DAY FROM TO [--every 60]      a lighter batch: one frame per active minute + every window switch
     ll.py transcript DAY FROM TO              everything heard (mic + computer audio), with speakers
@@ -324,9 +325,36 @@ def cmd_phone(a):
         print(text)
 
 
+SCREEN_LINE = re.compile(r"^(\s*\[(?:screen text \(new view\)|new on screen) \d\d:\d\d:\d\d\]) (.*)$")
+
+
+def brief_log(text: str, window: float = 180, similar: float = 0.6, cut: int = 300) -> str:
+    """drop screen-text lines that mostly repeat one shown in the last few minutes (flicking between the same windows),
+    and shorten the rest; everything else is untouched. `ll.py ocr` still has every word."""
+    kept: list[tuple[float, set[str]]] = []
+    out = []
+    for line in text.split("\n"):
+        m = SCREEN_LINE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        hh, mm, ss = (int(v) for v in re.search(r"(\d\d):(\d\d):(\d\d)\]", m.group(1)).groups())
+        t = hh * 3600 + mm * 60 + ss
+        words = set(re.findall(r"\w{3,}", m.group(2).lower()))
+        kept = [(kt, kw) for kt, kw in kept if 0 <= t - kt <= window]
+        if words and any(len(words & kw) / len(words | kw) >= similar for _, kw in kept):
+            continue
+        kept.append((t, words))
+        body = m.group(2)
+        out.append(f"{m.group(1)} {body[:cut]}{'…' if len(body) > cut else ''}")
+    return "\n".join(out)
+
+
 def cmd_log(a):
     x, y = span(a.day, a.frm, a.to)
-    text, n = L.build_log(db_for(x, y), x, y, max_chars=10 ** 9 if a.full else 110_000)
+    text, n = L.build_log(db_for(x, y), x, y, max_chars=10 ** 9 if a.full or a.brief else 110_000)
+    if a.brief:
+        text = brief_log(text)
     print(text if n else "(no data recorded in this range)")
     print(f"\n[{n} seconds of samples, {len(text):,} chars]", file=sys.stderr)
 
@@ -418,22 +446,23 @@ def cmd_shots(a):
 
 
 def pil():
-    """Pillow for shrinking frames; installed on first use (the cloud environment allows package managers)"""
+    """Pillow for shrinking frames and building contact sheets; installed on first use (the cloud allows pip)"""
     try:
         from PIL import Image
         return Image
     except ImportError:
-        import subprocess
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--user", "--break-system-packages", "pillow"],
-                       capture_output=True)
-        try:
-            import site, importlib
-            sys.path.append(site.getusersitepackages())
-            importlib.invalidate_caches()
-            from PIL import Image
-            return Image
-        except ImportError:
-            return None
+        import subprocess, site, importlib
+        for extra in (["--user", "--break-system-packages"], ["--break-system-packages"], ["--user"], []):
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", *extra, "pillow"], capture_output=True)
+            try:
+                if site.getusersitepackages() not in sys.path:
+                    sys.path.append(site.getusersitepackages())
+                importlib.invalidate_caches()
+                from PIL import Image
+                return Image
+            except ImportError:
+                continue
+        return None
 
 
 def frame_list(day: str, x: float, y: float) -> list[tuple[float, str, str]]:
@@ -449,10 +478,8 @@ def frame_list(day: str, x: float, y: float) -> list[tuple[float, str, str]]:
     return sorted(out)
 
 
-def cmd_frames(a):
-    """every screenshot taken while the person was active, shrunk; exact repeats collapsed"""
-    from concurrent.futures import ThreadPoolExecutor
-    x, y = span(a.day, a.frm, a.to)
+def active_frames(a, x: float, y: float) -> list[tuple[float, str, str]]:
+    """screenshots taken while the person was active, plus one every --idle-every s while idle (watching vs. gone)"""
     con, thr = db_for(x, y), L.CFG["idleThresholdSeconds"]
     state = {int(r["ts"]): (r["idle"] or 0, r["locked"]) for r in con.execute("SELECT ts, idle, locked FROM samples WHERE ts>=? AND ts<?", (x, y))}
     frames, last_idle = [], -1e9
@@ -460,13 +487,17 @@ def cmd_frames(a):
         idle, locked = state.get(int(ts), (0, 0))
         if locked:
             continue
-        if idle >= thr:  # nobody touching anything: a frame every --idle-every s still shows watching vs. gone
+        if idle >= thr:
             if ts - last_idle < a.idle_every:
                 continue
             last_idle = ts
         frames.append((ts, src, what))
-    Image = pil()
-    out = Path(a.out or f"/tmp/lifelog-frames/{a.day}")
+    return frames
+
+
+def download(frames, out: Path, width: int, Image) -> list[tuple[float, Path, str]]:
+    """fetch frames (in parallel) into out, shrunk to width when Pillow is available"""
+    from concurrent.futures import ThreadPoolExecutor
     out.mkdir(parents=True, exist_ok=True)
 
     def get(f):
@@ -477,15 +508,23 @@ def cmd_frames(a):
             if Image:
                 import io
                 im = Image.open(io.BytesIO(data)).convert("RGB")
-                if im.width > a.width:
-                    im = im.resize((a.width, round(im.height * a.width / im.width)), Image.LANCZOS)
+                if im.width > width:
+                    im = im.resize((width, round(im.height * width / im.width)), Image.LANCZOS)
                 im.save(dest, "JPEG", quality=72)
             else:
                 dest.write_bytes(data)
         return ts, dest, what
 
     with ThreadPoolExecutor(12) as ex:
-        got = list(ex.map(get, frames))
+        return list(ex.map(get, frames))
+
+
+def cmd_frames(a):
+    """every screenshot taken while the person was active, shrunk; exact repeats collapsed"""
+    x, y = span(a.day, a.frm, a.to)
+    frames = active_frames(a, x, y)
+    Image = pil()
+    got = download(frames, Path(a.out or f"/tmp/lifelog-frames/{a.day}"), a.width, Image)
     rows, prev_sig = [], None
     for ts, dest, what in got:
         sig = dest.read_bytes() if not Image else Image.open(dest).convert("L").resize((96, 60)).tobytes()
@@ -498,6 +537,61 @@ def cmd_frames(a):
         print(f"{hms(ts)}  {dest}  ({what})" + (f"  — unchanged until {hms(until)}" if until else ""))
     print(f"\n{len(rows)} frames to Read ({len(frames)} active screenshots, {len(frames) - len(rows)} exact repeats collapsed)"
           + ("" if Image else "; Pillow unavailable, so frames are full size"), file=sys.stderr)
+
+
+def cmd_sheets(a):
+    """contact sheets: the screenshots that show something new, tiled cols×rows with a time label on each tile.
+    A frame is kept at every window switch, and otherwise when the screen changed visibly and --every s have passed."""
+    Image = pil()
+    if not Image:
+        die("contact sheets need Pillow and pip couldn't install it: run `pip install pillow`, then retry")
+    from PIL import ImageChops, ImageDraw, ImageFont, ImageStat
+    x, y = span(a.day, a.frm, a.to)
+    frames = active_frames(a, x, y)
+    got = download(frames, Path(a.out or f"/tmp/lifelog-frames/{a.day}") / f"t{a.tile}", a.tile, Image)
+    picked, last_sig, last_ts, last_what = [], None, -1e9, None
+    for ts, dest, what in got:
+        sig = Image.open(dest).convert("L").resize((64, 40))
+        if last_sig is None:
+            keep = True
+        else:
+            diff = ImageStat.Stat(ImageChops.difference(sig, last_sig)).mean[0]
+            switched = what != last_what and ts - last_ts >= 2
+            keep = switched and diff > 1 or ts - last_ts >= a.every and diff > a.change
+        if keep:
+            picked.append((ts, dest, what))
+            last_sig, last_ts, last_what = sig, ts, what
+    if not picked:
+        print("(no screenshots while active in this range)")
+        return
+    try:
+        font = ImageFont.load_default(size=14)
+    except TypeError:
+        font = ImageFont.load_default()
+    per = a.cols * a.rows
+    first = Image.open(picked[0][1])
+    tw, th, lh = a.tile, round(first.height * a.tile / first.width), 18
+    sheet_dir = Path(a.out or f"/tmp/lifelog-sheets/{a.day}")
+    sheet_dir.mkdir(parents=True, exist_ok=True)
+    for n in range(0, len(picked), per):
+        batch = picked[n:n + per]
+        rows_used = -(-len(batch) // a.cols)
+        sheet = Image.new("RGB", (a.cols * tw, rows_used * (th + lh)), "white")
+        draw = ImageDraw.Draw(sheet)
+        for i, (ts, dest, what) in enumerate(batch):
+            cx, cy = (i % a.cols) * tw, (i // a.cols) * (th + lh)
+            sheet.paste(Image.open(dest).resize((tw, th)), (cx, cy + lh))
+            draw.rectangle([cx, cy, cx + tw - 1, cy + lh - 1], fill="black")
+            draw.text((cx + 4, cy + 1), f"{n + i + 1}  {hms(ts)}  {what.split(' — ')[0][:28]}", fill="white", font=font)
+        end = picked[n + per][0] if n + per < len(picked) else y
+        path = sheet_dir / f"{hms(batch[0][0]).replace(':', '')}-{hms(end).replace(':', '')}.jpg"
+        sheet.save(path, "JPEG", quality=80)
+        print(f"SHEET {n // per + 1}  {path}  ({hms(batch[0][0])}–{hms(end)})")
+        for i, (ts, _, what) in enumerate(batch):
+            nxt = picked[n + i + 1][0] if n + i + 1 < len(picked) else y
+            print(f"  {n + i + 1:>3}  {hms(ts)}–{hms(nxt)}  {what}")
+    print(f"\n{-(-len(picked) // per)} sheets with {len(picked)} tiles for {hms(x)}–{hms(y)} "
+          f"({len(frames)} active screenshots). Read every sheet, in order.", file=sys.stderr)
 
 
 def cmd_transcript(a):
@@ -661,11 +755,17 @@ def main():
         p = sub.add_parser(name); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
         if name in ("log", "agents"):
             p.add_argument("--full", action="store_true")
+        if name == "log":
+            p.add_argument("--brief", action="store_true", help="untrimmed, but repeated screen text dropped and the rest shortened")
         if name == "ocr":
             p.add_argument("--grep")
     p = sub.add_parser("shot"); p.add_argument("day"); p.add_argument("time"); p.add_argument("--out")
     p = sub.add_parser("frames"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
     p.add_argument("--width", type=int, default=960); p.add_argument("--idle-every", type=int, default=120); p.add_argument("--out")
+    p = sub.add_parser("sheets"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
+    p.add_argument("--every", type=int, default=10); p.add_argument("--change", type=float, default=3)
+    p.add_argument("--cols", type=int, default=3); p.add_argument("--rows", type=int, default=3)
+    p.add_argument("--tile", type=int, default=440); p.add_argument("--idle-every", type=int, default=120); p.add_argument("--out")
     p = sub.add_parser("shots"); p.add_argument("day"); p.add_argument("frm"); p.add_argument("to")
     p.add_argument("--every", type=int, default=60); p.add_argument("--max", type=int, default=60); p.add_argument("--out")
     p = sub.add_parser("search"); p.add_argument("day"); p.add_argument("words", nargs="+")

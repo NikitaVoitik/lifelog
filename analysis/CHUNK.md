@@ -7,16 +7,19 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
 ## How to work
 
 1. `ll.py guide` once. It explains every line type in the log and lists the categories.
-2. `ll.py log DAY FROM TO --full`. This is the whole chunk, untrimmed: 10-second activity buckets, window switches, screen
-   text (OCR), speech, and coding-agent prompts/replies. If it is very long, read it in ~20-minute pieces.
-3. `ll.py frames DAY FROM TO`. This downloads **every** screenshot taken while the person was active (the recorder saves
-   a frame whenever the screen changes, up to 1/s), shrunk to 960 px, and prints `time path (app — window)`. **Read all of
-   them, in time order, without skipping**, alongside the log. Read them in batches of ~20 and keep running notes of
-   what changes. They are the ground truth: OCR is noisy and blind to images, video and layout. They show which tab or
-   message was open, what was being typed, what video was playing, and whether the screen changed with no input.
+2. `ll.py log DAY FROM TO --brief`. This is the whole chunk: 10-second activity buckets, window switches, speech, and
+   coding-agent prompts/replies, untrimmed; screen text (OCR) that repeats what was on screen in the last few minutes is
+   dropped and the rest shortened. If it is very long, read it in ~20-minute pieces.
+3. `ll.py sheets DAY FROM TO`. This builds **contact sheets**: 3×3 tiles, each labeled with its number, time and app,
+   from the screenshots that show something new (every window switch, and otherwise a visible change at most every 10 s).
+   It prints each sheet's path followed by its tiles (`number  from–to  app — window`). **Read every sheet, in order**,
+   alongside the log; you can Read several sheets in one turn. Keep running notes of what changes. They are the ground
+   truth for what was on screen: OCR is noisy and blind to images, video and layout. A tile covers its screen until the
+   next tile's time.
 4. Then dig wherever it's still unclear, without guessing:
-   - If text in a frame is too small to read, `ll.py shot DAY HH:MM:SS` gives that moment at full resolution.
-   - `ll.py ocr DAY HH:MM HH:MM [--grep WORD]` gives the full screen text of a short span (the log only shows what changed).
+   - Tiles are small. When it matters what a tile says (which thread, message or video), `ll.py ocr DAY HH:MM HH:MM
+     [--grep WORD]` gives the full screen text of a short span, and `ll.py shot DAY HH:MM:SS` gives one moment at full
+     resolution. Use `shot` for the few moments that decide a segment (about 10 at most), not to re-read the chunk.
    - `ll.py transcript DAY HH:MM HH:MM` gives everything said. "Me" is the person; others are named voices or "voice #N".
    - `ll.py phone DAY HH:MM HH:MM` gives the iPhone's record alone ("[PHONE …]" lines are also in the log): when the phone
      was unlocked, calls, walking, places, and speech heard by the phone's mic. Phone use during laptop work is a

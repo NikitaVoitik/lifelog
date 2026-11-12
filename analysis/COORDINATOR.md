@@ -13,34 +13,41 @@ say so in your final message. Never print the token.
 
 1. **What to do.** Run `ll.py status`. It prints the next range: from the start of the last deep segment (it may have been
    cut off by the end of the data) up to the newest recorded second. If there are less than 20 minutes of new data,
-   say so and stop. If the range is more than 14 h, do its first 14 h; the next run continues from there.
+   say so and stop. If the range is more than 16 h, do its first 16 h; the next run continues from there.
 2. **Survey.** Run `ll.py overview DAY FROM TO` for the range (once per day if it crosses midnight). Also run `ll.py sleep`
    and `ll.py timeline DAY` for the day so far, to see what came before. The overview's `phone-s` and `steps` columns come
    from the person's iPhone (seconds unlocked, steps walked); rows can exist with the laptop off.
 3. **Plan chunks.** Split the range into contiguous chunks that cover it exactly. Put boundaries at natural breaks: long
    idle, screen locked, or an app or topic change.
    - Active stretches: size each chunk by the `frames` column of the overview (screenshots taken while active). An agent
-     reads every one of them, so give each **at most ~150 frames**. On a busy screen that's 5–10 minutes; on a calm one
-     it's much longer.
+     reads them as contact sheets of the frames that show something new (roughly 1 in 6 on a busy screen), so give each
+     agent **about 1,000–1,500 frames**: ~20–30 minutes of a busy screen, an hour or more of a calm one. Don't make
+     chunks smaller than that to gain precision; the sheets and the log already resolve seconds.
    - Stretches with no laptop input (locked, idle, no data): one chunk each, done by you (step 5). Don't spend an agent on
      them unless the overview shows a lot of speech or prompts from the user inside them.
-   - Aim for at most ~30 agents per run, and launch them in waves of ~10 if needed. If the range needs more, shorten the
-     range: do the first part completely and leave the rest for the next run.
-4. **Run the swarm.** Launch one agent per active chunk, all at once, in parallel (Agent tool, `model: "sonnet"`). Each
-   prompt is the full text of `analysis/CHUNK.md` followed by:
+   - Use at most **15 agents** per run. If the range needs more, shorten the range: do the first part completely and
+     leave the rest for the next run.
+4. **Run the swarm.** Launch one agent per active chunk, all in a single message, in parallel (Agent tool,
+   `model: "sonnet"`, `run_in_background: false`), so you wait once for all of them instead of being woken by each.
+   While they run you have nothing to do; do the absences (step 5) before launching or after they return. Each prompt
+   is the full text of `analysis/CHUNK.md` followed by:
    - DAY, FROM, TO, OUTPUT (`/tmp/deep/chunk_NN.json`, numbered in time order);
    - 2–4 lines of context: what the person was doing just before the chunk, names of projects or people seen so far, and
-     anything special (e.g. "they're on a call that started at 13:10").
-5. **Absences (you decide).** Read `ll.py guide absences`: those are the rules. Then decide each no-input stretch from the
-   evidence. Run `ll.py phone DAY FROM TO` for each one: the iPhone shows when they used the phone (unlocked sessions),
-   walked, left or arrived at places, took calls, charged it at night, and what was said around it. Also look at the time of
-   day, lock/unlock events, speech, prompts the user sent (from the phone means awake), what came before and after, and
-   recent sleep history. Split the stretch where the phone shows the activity changed: e.g. "on phone" for unlocked sessions
-   of a minute or more (merge sessions a few minutes apart), "away" while walking or out (name the place if the phone did),
-   "voice & calls" for a phone call. One "sleep" segment per night, with the bed time and wake time
-   you judge most likely. Daytime absences are usually "away"; use "idle at desk" if they were present but not touching
-   anything. Write these as segments in `/tmp/deep/absences.json` (same format as the chunks). If an agent's reply says
-   part of its chunk looks like sleep or being out, decide that too.
+     anything special (e.g. "they're on a call that started at 13:10"). Facts only: don't describe the chunk itself or
+     suggest it's simple, or the agent will skim instead of reading the sheets.
+5. **Absences (a Sonnet agent reads, you decide).** You are the only Opus in this run: keep your own reading small and
+   let Sonnet agents do the reading. Launch one more Sonnet agent in the same message as the chunk agents, for all
+   no-input stretches together. Its prompt: read `ll.py guide absences` (the rules) and, for each stretch (list them with
+   DAY FROM TO), run `ll.py phone DAY FROM TO`. The iPhone shows when they used the phone (unlocked sessions), walked,
+   left or arrived at places, took calls, charged it at night, and what was said around it. The agent also weighs the time
+   of day, lock/unlock events, speech, prompts the user sent (from the phone means awake), and `ll.py sleep`. It splits
+   each stretch where the phone shows the activity changed: e.g. "on phone" for unlocked sessions of a minute or more
+   (merge sessions a few minutes apart), "away" while walking or out (name the place if the phone did), "voice & calls"
+   for a phone call, one "sleep" segment per night with the most likely bed and wake time, "idle at desk" if present but
+   not touching anything. It writes `/tmp/deep/absences.json` (same format as the chunks), runs `ll.py check` on it, and
+   replies with each call it made and the evidence for it, flagging any it is unsure of.
+   **You decide:** check its calls against what came before and after (and the chunk agents' replies), and edit the file
+   where you judge differently. If a chunk agent says part of its chunk looks like sleep or being out, decide that too.
 6. **Stitch.** Run `ll.py stitch /tmp/deep/all.json /tmp/deep/chunk_*.json /tmp/deep/absences.json`. Fix every problem
    it reports: gaps or overlaps at chunk boundaries (move a boundary to the real transition), and the same activity
    split across a boundary (merge it). Re-run `ll.py check /tmp/deep/all.json` until it says ok. Make sure the file's
