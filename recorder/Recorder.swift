@@ -230,6 +230,8 @@ final class InputMonitor {
     private var scroll: Double = 0, mouse: Double = 0
     private var lastMouse: CGPoint?
     private var tap: CFMachPort?
+    private var moveTap: CFMachPort?      // mouse moves/drags only; paused after each event it delivers (see handle)
+    private var moveResumeScheduled = false
     private var startedAt = ProcessInfo.processInfo.systemUptime
     private var lastHuman: TimeInterval?   // systemUptime of the last hardware event the tap saw
     private var lastSynth: TimeInterval?   // … and of the last injected one
@@ -240,8 +242,18 @@ final class InputMonitor {
         startedAt = ProcessInfo.processInfo.systemUptime
         // counted types + ones only used to know when you last touched anything (key-ups, modifiers, button-ups)
         let types: [CGEventType] = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
-                                    .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel, .mouseMoved,
-                                    .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+                                    .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel]
+        // Mouse moves come at up to ~120/s, and receiving each one through a tap (a mach message the window server
+        // encodes and we decode) was the main thread's biggest cost. They get their own tap that switches itself off
+        // for 200 ms after every event, so we see ≤5 moves a second; distance is the straight line between them.
+        let moveTypes: [CGEventType] = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        guard let t = makeTap(types) else { return false }
+        tap = t
+        moveTap = makeTap(moveTypes)
+        return true
+    }
+
+    private func makeTap(_ types: [CGEventType]) -> CFMachPort? {
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let t = CGEvent.tapCreate(
@@ -252,12 +264,23 @@ final class InputMonitor {
                 me.handle(type, event)
                 return Unmanaged.passUnretained(event)
             }, userInfo: refcon)
-        else { return false }
+        else { return nil }
         let src = CFMachPortCreateRunLoopSource(nil, t, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         CGEvent.tapEnable(tap: t, enable: true)
-        tap = t
-        return true
+        return t
+    }
+
+    /// called on the main run loop after each move event: pause the move tap for 200 ms
+    private func throttleMoves() {
+        guard let m = moveTap, !moveResumeScheduled else { return }
+        CGEvent.tapEnable(tap: m, enable: false)
+        moveResumeScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, let m = self.moveTap else { return }
+            self.moveResumeScheduled = false
+            CGEvent.tapEnable(tap: m, enable: true)
+        }
     }
 
     private func handle(_ type: CGEventType, _ e: CGEvent) {
@@ -265,7 +288,12 @@ final class InputMonitor {
             // "user input" here usually means macOS pulled Input Monitoring (e.g. after a rebuild changed the binary)
             log("input tap: disabled by \(type == .tapDisabledByTimeout ? "timeout" : "the system (check Input Monitoring)"), re-enabling")
             if let t = tap { CGEvent.tapEnable(tap: t, enable: true) }
+            if let m = moveTap, !moveResumeScheduled { CGEvent.tapEnable(tap: m, enable: true) }
             return
+        }
+        switch type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: throttleMoves()
+        default: break
         }
         lock.lock(); defer { lock.unlock() }
         let now = ProcessInfo.processInfo.systemUptime
