@@ -629,17 +629,22 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
               let raw = info[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
               let pb = sb.imageBuffer
         else { return }
+        handleFrame(pb)
+    }
 
+    /// one delivered frame: drop it if nothing changed, else save a JPEG (+ OCR now and then). Also called by bench/.
+    func handleFrame(_ pb: CVPixelBuffer) {
         lock.lock()
         let ctx = self.ctx, allowed = self.allowed, force = self.forceNext
         lock.unlock()
         guard allowed else { return }
 
+        // decide from the raw pixels first: most delivered frames are dropped and never need a CGImage
+        let thumb = Self.thumbnail(pb)
+        if !force, let last = lastThumb, !Self.changed(thumb, last) { return }
         var cgOut: CGImage?
         VTCreateCGImageFromCVPixelBuffer(pb, options: nil, imageOut: &cgOut)
         guard let img = cgOut else { return }
-        let thumb = Self.thumbnail(img)
-        if !force, let last = lastThumb, !Self.changed(thumb, last) { return }
         lastThumb = thumb
         lock.lock(); forceNext = false; lock.unlock()
 
@@ -681,22 +686,38 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// OCR only every `ocrInterval` seconds (and on every app/tab switch) — frames in between are kept as images only.
-    private func ocr(_ img: CGImage, id: Int64) {
+    static func ocrRequest() -> VNRecognizeTextRequest {
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
         req.usesLanguageCorrection = true
         req.recognitionLanguages = Self.ocrLanguages
+        return req
+    }
+
+    /// reading order: top to bottom, then left to right
+    static func ocrText(_ req: VNRecognizeTextRequest) -> String {
+        let obs = (req.results ?? []).sorted {
+            let a = $0.boundingBox, b = $1.boundingBox
+            if abs(a.midY - b.midY) > 0.01 { return a.midY > b.midY }
+            return a.minX < b.minX
+        }
+        return obs.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
+    func ocrForBench(_ img: CGImage) -> String? {
+        let req = Self.ocrRequest()
+        do { try VNImageRequestHandler(cgImage: img).perform([req]) } catch { return nil }
+        return Self.ocrText(req)
+    }
+
+    private func ocr(_ img: CGImage, id: Int64) {
+        let req = Self.ocrRequest()
         ocrBusy = true; ocrStartedAt = Date().timeIntervalSince1970; ocrReq = req
         ocrQueue.async {
             defer { self.frameQueue.async { self.ocrBusy = false; self.ocrReq = nil } }
             do {
                 try VNImageRequestHandler(cgImage: img).perform([req])
-                let obs = (req.results ?? []).sorted {
-                    let a = $0.boundingBox, b = $1.boundingBox
-                    if abs(a.midY - b.midY) > 0.01 { return a.midY > b.midY }
-                    return a.minX < b.minX
-                }
-                let text = obs.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+                let text = Self.ocrText(req)
                 self.db.run("UPDATE screenshots SET ocr=? WHERE id=?", [text, id])
                 self.db.run("INSERT INTO ocr_fts(rowid, text) VALUES(?,?)", [id, text])
                 self.frameQueue.async { self.ocrFails = 0 }
@@ -715,13 +736,42 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     static let thumbW = 96, thumbH = 60
 
-    static func thumbnail(_ img: CGImage) -> [UInt8] {
+    /// 96x60 grey thumbnail straight from the BGRA frame: each cell is the mean luma of every 2nd pixel of every 2nd row
+    /// in it. Same job as drawing the frame into a 96x60 grey CGContext, which colour-converted and resampled all
+    /// 2.4 M pixels on every delivered frame and was ~70% of the recorder's CPU.
+    static func thumbnail(_ pb: CVPixelBuffer) -> [UInt8] {
         var px = [UInt8](repeating: 0, count: thumbW * thumbH)
-        px.withUnsafeMutableBytes { buf in
-            if let ctx = CGContext(data: buf.baseAddress, width: thumbW, height: thumbH, bitsPerComponent: 8, bytesPerRow: thumbW,
-                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) {
-                ctx.interpolationQuality = .medium
-                ctx.draw(img, in: CGRect(x: 0, y: 0, width: thumbW, height: thumbH))
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard CVPixelBufferGetPixelFormatType(pb) == kCVPixelFormatType_32BGRA,
+              let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self) else { return px }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), rb = CVPixelBufferGetBytesPerRow(pb)
+        guard w >= thumbW * 2, h >= thumbH * 2 else { return px }
+        // cell c covers pixel columns [x0[c], x0[c+1]) and rows [y0[r], y0[r+1]); we read even columns of even rows
+        let x0 = (0...thumbW).map { $0 * w / thumbW }, y0 = (0...thumbH).map { $0 * h / thumbH }
+        var row = [UInt32](repeating: 0, count: thumbW)
+        for r in 0..<thumbH {
+            for c in 0..<thumbW { row[c] = 0 }
+            var rows: UInt32 = 0
+            for y in stride(from: (y0[r] + 1) & ~1, to: y0[r + 1], by: 2) {
+                let line = base + y * rb
+                rows += 1
+                for c in 0..<thumbW {
+                    var sum: UInt32 = 0
+                    var p = line + ((x0[c] + 1) & ~1) * 4
+                    let end = line + x0[c + 1] * 4
+                    while p < end {  // BGRA → luma, BT.601 weights ×256
+                        sum &+= UInt32(p[0]) &* 29 &+ UInt32(p[1]) &* 150 &+ UInt32(p[2]) &* 77
+                        p += 8
+                    }
+                    row[c] &+= sum
+                }
+            }
+            // flip vertically so cell order matches CoreGraphics' bottom-left origin (keeps old/new thumbs comparable)
+            let out = (thumbH - 1 - r) * thumbW
+            for c in 0..<thumbW {
+                let n = rows * UInt32((x0[c + 1] - ((x0[c] + 1) & ~1) + 1) / 2)
+                px[out + c] = n > 0 ? UInt8(min(255, row[c] / n / 256)) : 0
             }
         }
         return px

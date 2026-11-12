@@ -55,7 +55,7 @@ if CommandLine.arguments.contains("--selftest-frames") {
         let t0 = Date()
         var cg: CGImage?
         VTCreateCGImageFromCVPixelBuffer(pb, options: nil, imageOut: &cg)
-        let th = ScreenCapturer.thumbnail(cg!)
+        let th = ScreenCapturer.thumbnail(pb)
         if last == nil || ScreenCapturer.changed(th, last!) { changedCount += 1 }
         last = th
         let url = try! cap.saveForTest(cg!)
