@@ -42,7 +42,9 @@ Your tool is `python3 analysis/ll.py` (run from the repo root). Every command pr
   session cookie is dropped", "Scrolling X home feed", "Reading Codex reply on usage QA".
 - **detail**: 1–2 sentences of evidence: what was typed, read, said or watched. Prefer what the screenshots showed
   (e.g. "screenshot 14:02:10: X thread about GPU pricing"). Don't invent. If unsure, say what the evidence suggests.
-- **category**: one from `ll.py guide`. Long no-input stretches get "away" (or "idle at desk" if they're clearly present:
+- **category**: exactly one of: away, browsing & research, coding & AI agents, communication, entertainment, idle at desk,
+  on phone, other, sleep, social media, voice & calls, writing & planning. Games and videos are "entertainment"; chat
+  apps, email and Slack are "communication". Long no-input stretches get "away" (or "idle at desk" if they're clearly present:
   reading, watching, talking). Leave sleep decisions to the coordinator unless the chunk is entirely an obvious night.
 - **app**: the main app or site ("T3 Code", "x.com", "Zed", "Telegram").
 
