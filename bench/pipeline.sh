@@ -46,6 +46,7 @@ EOF
 chmod +x "$STUBS/claude" "$STUBS/wrangler"
 
 PORT=$((20000 + RANDOM % 20000))
+rm -f "$OUT/mock.json"  # counters belong to this server
 python3 "$REPO/bench/mock_worker.py" "$PORT" "$OUT/mock.json" &
 MOCK=$!
 trap 'kill $MOCK 2>/dev/null' EXIT
