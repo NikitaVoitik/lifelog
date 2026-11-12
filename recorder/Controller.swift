@@ -32,11 +32,11 @@ final class Recorder {
 
     private func build() {
         probe.useAppleScript = cfg.browserAppleScriptFallback
-        screen = ScreenCapturer(db: db, cfg: cfg)
         micWriter = ChunkedAudioWriter(source: "mic", db: db, chunkSeconds: cfg.audioChunkSeconds)
         sysWriter = ChunkedAudioWriter(source: "sys", db: db, chunkSeconds: cfg.audioChunkSeconds)
+        screen = ScreenCapturer(db: db, cfg: cfg, audio: cfg.recordSystemAudio ? sysWriter : nil)
         mic = MicRecorder(writer: micWriter, preferBuiltIn: cfg.preferBuiltInMic)
-        sys = SystemAudioRecorder(writer: sysWriter)
+        sys = SystemAudioRecorder(writer: sysWriter, screen: screen)
     }
 
     func start() {

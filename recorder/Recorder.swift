@@ -489,7 +489,21 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var savedSession = 0
     private(set) var lastError: String?
 
-    init(db: DB, cfg: Config) { self.db = db; self.cfg = cfg }
+    /// System audio rides on this same stream (capturesAudio) instead of a second SCStream: every live capture
+    /// session makes macOS's privacy-indicator update slower, and each user screenshot waits for that update
+    /// before grabbing pixels — a second stream cost ~0.5 s per ⌘⇧4/⌘⇧5 screenshot.
+    private let audioSink: ChunkedAudioWriter?
+    private let audioQueue = DispatchQueue(label: "sysaudio", qos: .utility)
+    private var audioOn = false  // guarded by lock; toggled by SystemAudioRecorder (e.g. off while locked)
+
+    init(db: DB, cfg: Config, audio: ChunkedAudioWriter? = nil) { self.db = db; self.cfg = cfg; self.audioSink = audio }
+
+    func setAudio(_ on: Bool) {
+        lock.withLock { audioOn = on }
+        if !on { audioSink?.close() }
+    }
+
+    var audioActive: Bool { running && audioSink != nil && lock.withLock { audioOn } }
 
     /// called every second from the main tick
     func update(ctx: Context, allowed: Bool, switched: Bool) {
@@ -524,7 +538,14 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         conf.minimumFrameInterval = CMTime(value: CMTimeValue(1000 / fps), timescale: 1000)
         conf.pixelFormat = kCVPixelFormatType_32BGRA
         conf.showsCursor = true
-        conf.capturesAudio = false
+        if audioSink != nil {
+            conf.capturesAudio = true
+            conf.excludesCurrentProcessAudio = true
+            conf.sampleRate = 48000
+            conf.channelCount = 2
+        } else {
+            conf.capturesAudio = false
+        }
         conf.queueDepth = 4
         return (filter, conf, display.displayID)
     }
@@ -539,6 +560,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
                 let (filter, conf, did) = try await self.makeFilterAndConfig()
                 let s = SCStream(filter: filter, configuration: conf, delegate: self)
                 try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.frameQueue)
+                if self.audioSink != nil { try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.audioQueue) }
                 try await s.startCapture()
                 if !self.wantRunning { try? await s.stopCapture(); return }
                 self.stream = s
@@ -588,6 +610,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         log("screen: stream stopped: \(error.localizedDescription)")
+        audioSink?.close()
         DispatchQueue.main.async {
             self.running = false
             self.stream = nil
@@ -596,6 +619,11 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        if type == .audio {
+            guard let sink = audioSink, lock.withLock({ audioOn }), let pcm = SystemAudioRecorder.pcm(sb) else { return }
+            sink.append(pcm)
+            return
+        }
         guard type == .screen, sb.isValid,
               let info = (CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
               let raw = info[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete,
@@ -979,84 +1007,30 @@ final class MicRecorder {
     }
 }
 
-final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
+/// System audio. Captured by ScreenCapturer's stream (see ScreenCapturer.audioSink) rather than an SCStream of its
+/// own; this just switches it on and off so the controller's start/stop/locked rules stay the same.
+final class SystemAudioRecorder {
     let writer: ChunkedAudioWriter
-    private var stream: SCStream?
-    private let queue = DispatchQueue(label: "sysaudio")
-    private(set) var running = false
-    var wantRunning = false
+    private let screen: ScreenCapturer
+    var running: Bool { screen.audioActive }
 
-    init(writer: ChunkedAudioWriter) { self.writer = writer }
-
-    private var starting = false
+    init(writer: ChunkedAudioWriter, screen: ScreenCapturer) { self.writer = writer; self.screen = screen }
 
     func start() {
-        guard !running, !starting else { return }
-        wantRunning = true
-        starting = true
-        Task {
-            defer { DispatchQueue.main.async { self.starting = false } }
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-                guard let display = content.displays.first else { return }
-                let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-                let conf = SCStreamConfiguration()
-                conf.capturesAudio = true
-                conf.excludesCurrentProcessAudio = true
-                conf.sampleRate = 48000
-                conf.channelCount = 2
-                conf.width = 2
-                conf.height = 2
-                conf.minimumFrameInterval = CMTime(value: 10, timescale: 1)
-                conf.queueDepth = 3
-                let s = SCStream(filter: filter, configuration: conf, delegate: self)
-                try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-                try await s.startCapture()
-                if !self.wantRunning { try? await s.stopCapture(); return }  // stopped while starting
-                self.stream = s
-                self.running = true
-                log("system audio: recording")
-            } catch {
-                log("system audio: start failed: \(error.localizedDescription)")
-                self.scheduleRetry()
-            }
-        }
+        guard !running else { return }
+        screen.setAudio(true)
+        log("system audio: recording (on the screen stream)")
     }
 
-    private func scheduleRetry() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-            guard let self, self.wantRunning, !self.running else { return }
-            self.start()
-        }
-    }
+    func stop() { screen.setAudio(false) }
 
-    func stop() {
-        wantRunning = false
-        let s = stream
-        stream = nil
-        running = false
-        Task { try? await s?.stopCapture() }
-        writer.close()
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, sb.isValid, let desc = sb.formatDescription else { return }
+    static func pcm(_ sb: CMSampleBuffer) -> AVAudioPCMBuffer? {
+        guard sb.isValid, let desc = sb.formatDescription else { return nil }
         let fmt = AVAudioFormat(cmAudioFormatDescription: desc)
         let frames = AVAudioFrameCount(sb.numSamples)
-        guard frames > 0, let pcm = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return }
+        guard frames > 0, let pcm = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return nil }
         pcm.frameLength = frames
         let st = CMSampleBufferCopyPCMDataIntoAudioBufferList(sb, at: 0, frameCount: Int32(frames), into: pcm.mutableAudioBufferList)
-        if st == noErr { writer.append(pcm) }
-    }
-
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        log("system audio: stopped: \(error.localizedDescription)")
-        DispatchQueue.main.async {
-            self.running = false
-            self.stream = nil
-            self.writer.close()
-            self.scheduleRetry()
-        }
+        return st == noErr ? pcm : nil
     }
 }
-
